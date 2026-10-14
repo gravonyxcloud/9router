@@ -628,7 +628,14 @@ export async function buildModelsList(kindFilter, options = {}) {
     dedupedModels.push(model);
   }
 
-  return dedupedModels;
+  // Codex's model catalog decoder requires the OpenAI Model.created field.
+  // Many dynamic/combo models do not carry creation timestamps, so normalize
+  // every listed model here instead of returning a schema Codex cannot decode.
+  const fallbackCreated = Math.floor(Date.now() / 1000);
+  return dedupedModels.map((model) => ({
+    created: Number.isFinite(model.created) ? model.created : fallbackCreated,
+    ...model,
+  }));
 }
 
 /**
@@ -652,9 +659,11 @@ export async function GET(request) {
   try {
     // Detect cross-instance recursive /models fetch (another 9router fetching our /models)
     const skipDynamicFetch = request?.headers?.get(INTERNAL_MODELS_FETCH_HEADER) === "1";
+    const comboModels = (await buildModelsList([LLM_KIND], { skipDynamicFetch }))
+      .filter((model) => model?.owned_by === "combo");
     const data = await filterModelsListForKey(
       await getKeyAccessContext(request),
-      await buildModelsList([LLM_KIND], { skipDynamicFetch })
+      comboModels
     );
     return Response.json({ object: "list", data }, {
       headers: { "Access-Control-Allow-Origin": "*" },

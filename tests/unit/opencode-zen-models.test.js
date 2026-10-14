@@ -75,9 +75,9 @@ describe("OpenCode Zen multi-endpoint transports", () => {
   });
 
   it("resolveTransport picks the endpoint matching the client sourceFormat", () => {
-    expect(resolveTransport("opencode-zen", "claude").baseUrl).toBe("https://opencode.ai/zen/v1/messages");
-    expect(resolveTransport("opencode-zen", "openai-responses").baseUrl).toBe("https://opencode.ai/zen/v1/responses");
-    expect(resolveTransport("opencode-zen", "openai").baseUrl).toBe("https://opencode.ai/zen/v1/chat/completions");
+    expect(resolveTransport("opencode-zen", "claude").baseUrl).toBe("https://opencode.ai/inference/v1/messages");
+    expect(resolveTransport("opencode-zen", "openai-responses").baseUrl).toBe("https://opencode.ai/inference/v1/responses");
+    expect(resolveTransport("opencode-zen", "openai").baseUrl).toBe("https://opencode.ai/inference/v1/chat/completions");
   });
 
   it("uses x-api-key + anthropicVersion on the claude transport", () => {
@@ -90,7 +90,7 @@ describe("OpenCode Zen multi-endpoint transports", () => {
 describe("OpenCode Zen per-model transport guard (chatCore logic)", () => {
   it("routes MiniMax/Qwen + claude-format client to /messages", () => {
     for (const m of CLAUDE_CAPABLE) {
-      expect(pickTransport("opencode-zen", "claude", "ocz", m)?.baseUrl).toBe("https://opencode.ai/zen/v1/messages");
+      expect(pickTransport("opencode-zen", "claude", "ocz", m)?.baseUrl).toBe("https://opencode.ai/inference/v1/messages");
     }
   });
 
@@ -102,14 +102,14 @@ describe("OpenCode Zen per-model transport guard (chatCore logic)", () => {
 
   it("routes DeepSeek + responses-format client to /responses", () => {
     for (const m of RESPONSES_CAPABLE) {
-      expect(pickTransport("opencode-zen", "openai-responses", "ocz", m)?.baseUrl).toBe("https://opencode.ai/zen/v1/responses");
+      expect(pickTransport("opencode-zen", "openai-responses", "ocz", m)?.baseUrl).toBe("https://opencode.ai/inference/v1/responses");
     }
   });
 
   it("routes Muse Spark (responses-only) to /responses, never to /messages", () => {
     for (const m of ["muse-spark-1.2", "muse-spark-1.3", "muse-spark-1.2-contributor-free", "muse-spark-1.3-contributor-free", "grok-4.6", "gpt-5.6-luna"]) {
       expect(getModelSupportedFormats("ocz", m)).toEqual(["openai-responses"]);
-      expect(pickTransport("opencode-zen", "openai-responses", "ocz", m)?.baseUrl).toBe("https://opencode.ai/zen/v1/responses");
+      expect(pickTransport("opencode-zen", "openai-responses", "ocz", m)?.baseUrl).toBe("https://opencode.ai/inference/v1/responses");
       expect(pickTransport("opencode-zen", "claude", "ocz", m)).toBeNull();
       expect(pickTransport("opencode-zen", "openai", "ocz", m)).toBeNull();
     }

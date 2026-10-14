@@ -4,6 +4,7 @@ import { LEGACY_FILES, DB_DIR } from "./paths.js";
 import { TABLES, buildCreateTableSql, SCHEMA_VERSION } from "./schema.js";
 import { MIGRATIONS, latestVersion } from "./migrations/index.js";
 import { getMetaSync, setMetaSync } from "./helpers/metaStore.js";
+import { seedDefaultProxyListSources } from "./seedProxyLists.js";
 import { makeBackupDir, backupFile, backupDbLite, pruneOldBackups } from "./backup.js";
 import { getAppVersion } from "./version.js";
 import { stringifyJson } from "./helpers/jsonCol.js";
@@ -251,6 +252,10 @@ export async function runMigrationOnce(adapter) {
 
   // Stamp the schema version we just reached so future boots skip re-backup.
   setMetaSync(adapter, "backupSchemaVersion", SCHEMA_VERSION);
+
+  // Factory-default TXT proxy list sources (one-time, marker-gated — never
+  // reseeds, so user deletions and existing installs are untouched).
+  seedDefaultProxyListSources(adapter);
 
   // 3. One-time legacy JSON import (only if DB was fresh on entry)
   const alreadyImported = fs.existsSync(MIGRATED_MARKER);

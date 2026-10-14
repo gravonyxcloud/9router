@@ -71,11 +71,19 @@ export async function getKeyAccessContext(request) {
   const apiKey = extractClientApiKey(request);
   if (!apiKey) return null;
   const record = await getApiKeyByKey(apiKey);
-  if (!record?.access?.restricted) return null;
+  if (!record || !record.isActive) return null;
+
+  // Unrestricted keys retain the gateway's normal access to all configured
+  // providers/models. Apply the allow-list only when a key is explicitly
+  // marked restricted; otherwise every direct model request would incorrectly
+  // fail with HTTP 403.
+  if (!record.access?.restricted) return null;
+
   return {
     keyId: record.id,
     keyName: record.name || record.id,
-    allow: record.access.allow || [],
+    allow: Array.isArray(record.access.allow) ? record.access.allow : [],
+    combosOnly: false,
     _sets: null,
   };
 }
@@ -180,6 +188,11 @@ export async function filterAdapterModels(ctx, augmented, original) {
 export async function filterModelsListForKey(ctx, list) {
   if (!ctx || !Array.isArray(list)) return list;
   const sets = await getAllowSets(ctx);
+  if (ctx.combosOnly) {
+    return list
+      .filter((entry) => entry?.id && entry.owned_by === KEY_ACCESS_COMBO_OWNER && sets.combos.has(lower(entry.id)))
+      .map(({ id, object }) => ({ id, object: object || "model", owned_by: KEY_ACCESS_COMBO_OWNER }));
+  }
   const out = [];
   for (const entry of list) {
     if (!entry?.id) continue;

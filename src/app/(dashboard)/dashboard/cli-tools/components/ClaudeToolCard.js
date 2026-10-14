@@ -157,7 +157,9 @@ export default function ClaudeToolCard({
         if (model.envKey) {
           // Kept verbatim (marker included) so the input matches what is on disk;
           // withContextMarker strips before appending, so re-applying cannot double it.
-          const value = env[model.envKey] || model.defaultValue || "";
+          const savedValue = env[model.envKey] || "";
+          // Migrate legacy Claude Code aliases to the actual 9Router combo IDs.
+          const value = savedValue.startsWith("cc/") ? (model.defaultValue || savedValue) : (savedValue || model.defaultValue || "");
           // Only sync initial values from file once
           if (value) {
             onModelMappingChange(model.alias, value);
@@ -423,11 +425,8 @@ export default function ClaudeToolCard({
                       </div>
                       <button
                         onClick={() => openModelSelector(model.alias)}
-                        disabled={!hasActiveProviders}
                         className={`rounded border px-2.5 py-2 text-xs transition-colors sm:py-1.5 whitespace-nowrap shrink-0 ${
-                          hasActiveProviders
-                            ? "bg-surface border-border text-text-main hover:border-primary cursor-pointer"
-                            : "opacity-50 cursor-not-allowed border-border"
+                          "bg-surface border-border text-text-main hover:border-primary cursor-pointer"
                         }`}
                       >
                         Select

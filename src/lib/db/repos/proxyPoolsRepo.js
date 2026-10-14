@@ -70,6 +70,14 @@ export async function createProxyPool(data) {
     testStatus: data.testStatus || "unknown",
     lastTestedAt: data.lastTestedAt || null,
     lastError: data.lastError || null,
+    // TXT-list provenance (preserved in the data JSON by poolToRow).
+    ...(data.sourceId ? { sourceId: data.sourceId } : {}),
+    ...(data.sourceName ? { sourceName: data.sourceName } : {}),
+    ...(data.autoImported ? { autoImported: true } : {}),
+    // OpenCode-target verdict (second-stage probe: does upstream accept
+    // traffic from this egress IP?).
+    ...(data.opencodeOk !== undefined ? { opencodeOk: data.opencodeOk === true } : {}),
+    ...(data.opencodeCheckedAt ? { opencodeCheckedAt: data.opencodeCheckedAt } : {}),
     createdAt: now,
     updatedAt: now,
   };

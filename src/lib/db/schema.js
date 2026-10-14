@@ -3,7 +3,7 @@
 // pre-change safety backup in migrate.js: when the stored version is lower,
 // one lightweight DB backup is taken before applying schema changes. Forgetting
 // to bump only skips that backup — it does NOT break the additive auto-sync.
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 4;
 
 export const PRAGMA_SQL = `
 PRAGMA journal_mode = WAL;
@@ -75,6 +75,18 @@ export const TABLES = {
       "CREATE INDEX IF NOT EXISTS idx_pp_status ON proxyPools(testStatus)",
     ],
   },
+  proxyListSources: {
+    columns: {
+      id: "TEXT PRIMARY KEY",
+      isActive: "INTEGER DEFAULT 1",
+      data: "TEXT NOT NULL",
+      createdAt: "TEXT NOT NULL",
+      updatedAt: "TEXT NOT NULL",
+    },
+    indexes: [
+      "CREATE INDEX IF NOT EXISTS idx_pls_active ON proxyListSources(isActive)",
+    ],
+  },
   apiKeys: {
     columns: {
       id: "TEXT PRIMARY KEY",
@@ -87,8 +99,17 @@ export const TABLES = {
       // syncSchemaFromTables() on boot; existing rows read as unrestricted (0).
       accessRestricted: "INTEGER DEFAULT 0",
       accessAllow: "TEXT",
+      email: "TEXT",
+      plan: "TEXT",
+      expiresAt: "TEXT",
+      hourlyTokenLimit: "INTEGER DEFAULT 80000000",
+      orderId: "TEXT",
     },
-    indexes: ["CREATE INDEX IF NOT EXISTS idx_ak_key ON apiKeys(key)"],
+    indexes: [
+      "CREATE INDEX IF NOT EXISTS idx_ak_key ON apiKeys(key)",
+      "CREATE INDEX IF NOT EXISTS idx_ak_email ON apiKeys(email)",
+      "CREATE INDEX IF NOT EXISTS idx_ak_expiry ON apiKeys(expiresAt)",
+    ],
   },
   combos: {
     columns: {

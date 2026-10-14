@@ -362,8 +362,7 @@ export default function AntigravityToolCard({
                   </div>
                   <button
                     onClick={() => openModelSelector(model.alias)}
-                    disabled={!hasActiveProviders}
-                    className={`w-full sm:w-auto rounded border px-2 py-2 text-xs transition-colors sm:py-1.5 whitespace-nowrap sm:shrink-0 ${hasActiveProviders ? "bg-surface border-border text-text-main hover:border-primary cursor-pointer" : "opacity-50 cursor-not-allowed border-border"}`}
+                    className={`w-full sm:w-auto rounded border px-2 py-2 text-xs transition-colors sm:py-1.5 whitespace-nowrap sm:shrink-0 ${"bg-surface border-border text-text-main hover:border-primary cursor-pointer"}`}
                   >
                     Select
                   </button>

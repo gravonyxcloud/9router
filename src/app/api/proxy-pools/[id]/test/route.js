@@ -1,37 +1,6 @@
 import { NextResponse } from "next/server";
 import { getProxyPoolById, updateProxyPool } from "@/models";
-import { testProxyUrl } from "@/lib/network/proxyTest";
-import { fetch as undiciFetch } from "undici";
-
-async function testVercelRelay(relayUrl, timeoutMs = 10000) {
-  const controller = new AbortController();
-  const startedAt = Date.now();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await undiciFetch(relayUrl, {
-      method: "GET",
-      headers: {
-        "x-relay-target": "https://httpbin.org",
-        "x-relay-path": "/get",
-      },
-      signal: controller.signal,
-    });
-    return {
-      ok: res.ok,
-      status: res.status,
-      statusText: res.statusText,
-      elapsedMs: Date.now() - startedAt,
-    };
-  } catch (err) {
-    return {
-      ok: false,
-      status: 500,
-      error: err?.name === "AbortError" ? "Relay test timed out" : (err?.message || String(err)),
-    };
-  } finally {
-    clearTimeout(timer);
-  }
-}
+import { testProxyPool, testProxyOpencodeTarget, isRelayPoolType } from "@/lib/network/proxyTest";
 
 // POST /api/proxy-pools/[id]/test - Test proxy pool entry
 export async function POST(request, { params }) {
@@ -43,16 +12,38 @@ export async function POST(request, { params }) {
       return NextResponse.json({ error: "Proxy pool not found" }, { status: 404 });
     }
 
-    const result = proxyPool.type === "vercel" || proxyPool.type === "cloudflare" || proxyPool.type === "deno" || proxyPool.type === "netlify"
-      ? await testVercelRelay(proxyPool.proxyUrl)
-      : await testProxyUrl({ proxyUrl: proxyPool.proxyUrl });
+    const result = await testProxyPool(proxyPool);
     const now = new Date().toISOString();
 
+    // Second stage: a proxy may pass the generic check while its egress IP
+    // is burned at the upstream (rate limit / gate). Only meaningful when
+    // the generic probe passed and the pool is not a relay transport.
+    let opencodeOk = null;
+    let opencodeError = null;
+    if (result.ok && !isRelayPoolType(proxyPool.type)) {
+      try {
+        const gated = await testProxyOpencodeTarget(proxyPool.proxyUrl, { timeoutMs: 8000 });
+        opencodeOk = gated.ok;
+        if (!gated.ok) opencodeError = gated.error || `OpenCode probe HTTP ${gated.status}`;
+      } catch (err) {
+        opencodeOk = false;
+        opencodeError = err?.message || String(err);
+      }
+    }
+
+    // A proxy burned at the upstream (rate limit / gate) is deactivated
+    // like a dead one — the auto-health revival loop re-activates it once
+    // the gate lifts.
+    const burned = result.ok && opencodeOk === false;
+
     await updateProxyPool(id, {
-      testStatus: result.ok ? "active" : "error",
+      testStatus: result.ok && !burned ? "active" : "error",
       lastTestedAt: now,
-      lastError: result.ok ? null : (result.error || `Proxy test failed with status ${result.status}`),
-      isActive: result.ok,
+      lastError: result.ok
+        ? (burned ? opencodeError : null)
+        : (result.error || `Proxy test failed with status ${result.status}`),
+      isActive: result.ok && !burned,
+      ...(opencodeOk === null ? {} : { opencodeOk, opencodeCheckedAt: now }),
     });
 
     return NextResponse.json({
@@ -62,6 +53,8 @@ export async function POST(request, { params }) {
       error: result.error || null,
       elapsedMs: result.elapsedMs || 0,
       testedAt: now,
+      opencodeOk,
+      opencodeError,
     });
   } catch (error) {
     console.log("Error testing proxy pool:", error);

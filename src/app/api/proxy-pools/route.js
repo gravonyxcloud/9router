@@ -7,7 +7,7 @@ function toBoolean(value) {
   return undefined;
 }
 
-const VALID_PROXY_TYPES = ["http", "vercel", "cloudflare", "deno", "netlify"];
+const VALID_PROXY_TYPES = ["http", "socks4", "socks5", "vercel", "cloudflare", "deno", "netlify"]; // SOCKS types are accepted; runtime support is tested separately
 
 function normalizeProxyPoolInput(body = {}) {
   const name = typeof body?.name === "string" ? body.name.trim() : "";
@@ -15,7 +15,8 @@ function normalizeProxyPoolInput(body = {}) {
   const noProxy = typeof body?.noProxy === "string" ? body.noProxy.trim() : "";
   const isActive = body?.isActive === undefined ? true : body.isActive === true;
   const strictProxy = body?.strictProxy === true;
-  const type = VALID_PROXY_TYPES.includes(body?.type) ? body.type : "http";
+  const inferredType = /^socks4:\/\//i.test(proxyUrl) ? "socks4" : /^socks5h?:\/\//i.test(proxyUrl) ? "socks5" : "http";
+  const type = VALID_PROXY_TYPES.includes(body?.type) ? body.type : inferredType;
 
   if (!name) {
     return { error: "Name is required" };

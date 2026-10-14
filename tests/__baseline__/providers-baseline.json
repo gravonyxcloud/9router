@@ -201,11 +201,11 @@
     "baseUrl": "https://chatgpt.com/backend-api/codex/responses",
     "format": "openai-responses",
     "forceStream": true,
-    "cliVersion": "0.155.0",
+    "cliVersion": "0.159.0",
     "headers": {
       "originator": "codex_cli_rs",
-      "User-Agent": "codex_cli_rs/0.155.0",
-      "version": "0.155.0"
+      "User-Agent": "codex_cli_rs/0.159.0",
+      "version": "0.159.0"
     },
     "usage": {
       "url": "https://chatgpt.com/backend-api/wham/usage",
@@ -548,6 +548,18 @@
             "kimiHeaders"
           ]
         }
+      },
+      {
+        "format": "openai-responses",
+        "baseUrl": "https://api.kimi.com/coding/v1/responses",
+        "auth": {
+          "combined": true,
+          "header": "Authorization",
+          "scheme": "bearer",
+          "hooks": [
+            "kimiHeaders"
+          ]
+        }
       }
     ]
   },
@@ -776,7 +788,7 @@
     ]
   },
   "opencode-zen": {
-    "baseUrl": "https://opencode.ai/zen/v1/chat/completions",
+    "baseUrl": "https://opencode.ai/inference/v1/chat/completions",
     "headers": {},
     "usage": {
       "url": "https://opencode.ai/zen/v1/usage"
@@ -785,7 +797,7 @@
     "transports": [
       {
         "format": "openai",
-        "baseUrl": "https://opencode.ai/zen/v1/chat/completions",
+        "baseUrl": "https://opencode.ai/inference/v1/chat/completions",
         "auth": {
           "combined": true,
           "header": "Authorization",
@@ -794,7 +806,7 @@
       },
       {
         "format": "claude",
-        "baseUrl": "https://opencode.ai/zen/v1/messages",
+        "baseUrl": "https://opencode.ai/inference/v1/messages",
         "auth": {
           "combined": true,
           "header": "x-api-key",
@@ -804,7 +816,7 @@
       },
       {
         "format": "openai-responses",
-        "baseUrl": "https://opencode.ai/zen/v1/responses",
+        "baseUrl": "https://opencode.ai/inference/v1/responses",
         "auth": {
           "combined": true,
           "header": "Authorization",
@@ -816,7 +828,7 @@
   "opencode": {
     "baseUrl": "https://opencode.ai",
     "headers": {
-      "x-opencode-client": "desktop"
+      "x-opencode-client": "cli"
     },
     "forceStream": true,
     "noAuth": true,
@@ -1117,22 +1129,6 @@
     "validateUrl": "https://api.b.ai/v1/models",
     "format": "openai"
   },
-  "bedrock": {
-    "baseUrl": "https://bedrock-runtime.{region}.amazonaws.com",
-    "format": "claude",
-    "auth": {
-      "header": "aws-sigv4",
-      "scheme": "raw"
-    }
-  },
-  "bedrock-xai": {
-    "baseUrl": "https://bedrock-runtime.{region}.amazonaws.com",
-    "auth": {
-      "header": "aws-sigv4",
-      "scheme": "raw"
-    },
-    "format": "openai"
-  },
   "muse": {
     "baseUrl": "https://api.meta.ai/v1/chat/completions",
     "validateUrl": "https://api.meta.ai/v1/models",
@@ -1174,5 +1170,66 @@
         }
       }
     ]
+  },
+  "minimax-code": {
+    "baseUrl": "https://agent.minimax.cn/mavis/api/v1/llm/v1/messages",
+    "format": "claude",
+    "thinkingFormat": "claude-adaptive",
+    "headers": {
+      "User-Agent": "MiniMaxAgent",
+      "X-Mavis-Agent-Id": "main"
+    },
+    "auth": {
+      "combined": true,
+      "header": "Authorization",
+      "scheme": "bearer",
+      "anthropicVersion": true,
+      "hooks": [
+        "minimaxHeaders"
+      ]
+    },
+    "clientId": "mcode-public",
+    "tokenUrl": "https://account.minimax.cn/oauth2/token"
+  },
+  "minimax-code-global": {
+    "baseUrl": "https://agent.minimax.io/mavis/api/v1/llm/v1/messages",
+    "format": "claude",
+    "thinkingFormat": "claude-adaptive",
+    "headers": {
+      "User-Agent": "MiniMaxAgent",
+      "X-Mavis-Agent-Id": "main"
+    },
+    "auth": {
+      "combined": true,
+      "header": "Authorization",
+      "scheme": "bearer",
+      "anthropicVersion": true,
+      "hooks": [
+        "minimaxHeaders"
+      ]
+    },
+    "clientId": "mcode-public",
+    "tokenUrl": "https://account.minimax.io/oauth2/token"
+  },
+  "bedrock": {
+    "baseUrl": "https://bedrock-runtime.{region}.amazonaws.com",
+    "format": "claude",
+    "auth": {
+      "header": "aws-sigv4",
+      "scheme": "raw"
+    }
+  },
+  "bedrock-xai": {
+    "baseUrl": "https://bedrock-runtime.{region}.amazonaws.com",
+    "auth": {
+      "header": "aws-sigv4",
+      "scheme": "raw"
+    },
+    "format": "openai"
+  },
+  "opencode-sidecar": {
+    "baseUrl": "sidecar://opencode/run",
+    "format": "openai",
+    "noAuth": true
   }
 }

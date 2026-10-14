@@ -106,6 +106,31 @@ To pin a specific version instead of following `latest`, use a numbered image ta
 docker pull decolua/9router:0.5.81
 ```
 
+## Changing env vars / password on an existing deploy
+
+`INITIAL_PASSWORD` (and any other env var) is read **once at container
+creation**. After editing `.env` you must **recreate** the container —
+`restart` keeps the old environment and your new password will look "wrong":
+
+```bash
+docker compose up -d            # recreates with the new .env (correct)
+# NOT: docker compose restart   # keeps the old env (password unchanged!)
+```
+
+Two more gotchas:
+
+- Once a password hash exists in the database (volume `9router-data`),
+  `INITIAL_PASSWORD` is ignored — it only applies to fresh installs. Check
+  which source is active in the boot log:
+  `[InitApp] dashboard password source: env:INITIAL_PASSWORD |
+  database-stored | default-123456`. To force the env value, either change
+  the password in the dashboard (Settings) or wipe the volume for a truly
+  fresh install.
+- Code changes (like this repo) only reach the VPS after rebuilding and
+  republishing the image (`docker build` + push, or `build: .` in compose),
+  then `docker compose up -d`. Pulling `decolua/9router:latest` does not
+  include uncommitted local changes.
+
 ---
 
 # 🛠 For Developers

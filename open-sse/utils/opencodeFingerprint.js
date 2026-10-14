@@ -1,15 +1,21 @@
 /**
  * Helpers for the OpenCode Zen free-tier client fingerprint.
  *
- * Live upstream probes show that free-tier requests must include the lowercase
- * file-search quartet (bash/glob/grep/read). Agent clients such as Claude Code
- * may declare the same tools with different casing, so those case variants must
- * be renamed instead of duplicated. The response side restores the caller's
- * original spelling so downstream clients still recognise their own tool calls.
+ * Live upstream probes (2026-10-14, /inference/v1/chat/completions) show the
+ * free-tier gate requires streaming requests carrying the authentic OpenCode
+ * built-in quartet (bash/edit/read/write) with their genuine JSON schemas —
+ * dummy/empty parameters or missing tools trigger HTTP 403 FreeTierError.
+ * Agent clients such as Claude Code may declare overlapping tools with
+ * different casing, so those case variants are renamed (and re-schematised to
+ * the authentic definitions) instead of duplicated. The response side restores
+ * the caller's original spelling so downstream clients still recognise their
+ * own tool calls.
  */
+import { authenticToolDef } from "../config/opencodeTools.js";
+import { canonicalizeQuartetArgs } from "../translator/concerns/toolArgs.js";
 
 /** Canonical names required by the upstream free-tier gate. */
-export const OPENCODE_FINGERPRINT_TOOLS = ["bash", "glob", "grep", "read"];
+export const OPENCODE_FINGERPRINT_TOOLS = ["bash", "edit", "read", "write"];
 
 // Request body -> names renamed for that request. transformRequest() mutates the
 // same body object that chatCore passed into the executor, so a WeakMap keeps the
@@ -67,10 +73,19 @@ export function concealFingerprintToolNames(tools) {
 
     if (current !== key) {
       map.set(key, current);
+      // Re-schema renamed client tools to the authentic built-in definitions:
+      // foreign/dummy schemas on a quartet name trip the upstream gate.
       const fn = tool.function && typeof tool.function === "object" && !Array.isArray(tool.function)
         ? tool.function
         : null;
-      out.push(fn ? { ...tool, function: { ...fn, name: key } } : { ...tool, name: key });
+      const auth = authenticToolDef(key, !fn);
+      if (auth) {
+        out.push(auth);
+      } else if (fn) {
+        out.push({ ...tool, function: { ...fn, name: key } });
+      } else {
+        out.push({ ...tool, name: key });
+      }
     } else {
       out.push(tool);
     }
@@ -78,30 +93,31 @@ export function concealFingerprintToolNames(tools) {
   return { tools: out, map };
 }
 
-/** Append only genuinely missing quartet declarations. */
+/** Append only genuinely missing quartet declarations (authentic schemas — the
+ *  gate rejects dummy/empty parameters with 403 FreeTierError). */
 export function appendMissingFingerprintTools(tools, flat) {
   const list = Array.isArray(tools) ? tools : [];
   for (const name of OPENCODE_FINGERPRINT_TOOLS) {
     if (list.some((tool) => fingerprintToolKey(toolNameOf(tool)) === name)) continue;
-    list.push(flat ? {
+    const auth = authenticToolDef(name, flat);
+    list.push(auth || (flat ? {
       type: "function",
       name,
-      description: "This tool is currently unavailable and must not be used.",
+      description: "OpenCode built-in tool.",
       parameters: { type: "object", properties: {} },
     } : {
       type: "function",
       function: {
         name,
-        description: "This tool is currently unavailable and must not be used.",
+        description: "OpenCode built-in tool.",
         parameters: { type: "object", properties: {} },
       },
-    });
+    }));
   }
   return list;
 }
 
-/** Point an explicit tool_choice at a quartet member after canonicalisation. */
-export function retargetToolChoice(body, map) {
+/** Point an explicit tool_choice at a quartet member after canonicalisation. */export function retargetToolChoice(body, map) {
   if (!body || typeof body !== "object" || !map?.size) return;
   const choice = body.tool_choice;
   if (!choice || typeof choice !== "object" || Array.isArray(choice)) return;
@@ -121,6 +137,70 @@ export function retargetToolChoice(body, map) {
   }
 }
 
+function canonicalizeCallArgs(key, args) {
+  return canonicalizeQuartetArgs(key, args);
+}
+
+function canonicalizeHistoryCall(call) {
+  if (!call || typeof call !== "object" || Array.isArray(call)) return;
+  const fn = call.function && typeof call.function === "object" && !Array.isArray(call.function)
+    ? call.function
+    : null;
+  // Responses flat shape: {type:"function_call", name, arguments}
+  const rawName = fn ? fn.name : call.name;
+  const key = fingerprintToolKey(rawName);
+  if (!key) return;
+  if (fn) {
+    if (fn.name !== key) fn.name = key;
+    if (typeof fn.arguments === "string") {
+      try {
+        fn.arguments = JSON.stringify(canonicalizeCallArgs(key, JSON.parse(fn.arguments)));
+      } catch {
+        /* leave unparseable arguments untouched */
+      }
+    } else if (fn.arguments && typeof fn.arguments === "object") {
+      canonicalizeCallArgs(key, fn.arguments);
+    }
+    return;
+  }
+  if (call.name !== key) call.name = key;
+  if (typeof call.arguments === "string") {
+    try {
+      call.arguments = JSON.stringify(canonicalizeCallArgs(key, JSON.parse(call.arguments)));
+    } catch {
+      /* leave unparseable arguments untouched */
+    }
+  } else if (call.arguments && typeof call.arguments === "object") {
+    canonicalizeCallArgs(key, call.arguments);
+  }
+}
+
+/**
+ * Canonicalise prior-turn tool calls in message history (names to lowercase
+ * quartet + args to the authentic camelCase schemas). Upstream validates
+ * history turns against the declared tool schemas; snake_case args from agent
+ * clients would otherwise poison multi-turn conversations.
+ */
+export function canonicalizeHistoryTools(body) {
+  if (!body || typeof body !== "object") return;
+  if (Array.isArray(body.messages)) {
+    for (const m of body.messages) {
+      if (!m || typeof m !== "object" || Array.isArray(m)) continue;
+      if (Array.isArray(m.tool_calls)) {
+        for (const tc of m.tool_calls) canonicalizeHistoryCall(tc);
+      }
+    }
+  }
+  if (Array.isArray(body.input)) {
+    for (const item of body.input) {
+      if (item?.type === "function_call") canonicalizeHistoryCall(item);
+      if (item?.type === "function_call_output") {
+        // Outputs carry no schema — leave untouched.
+      }
+    }
+  }
+}
+
 /**
  * Full request-side pass: canonicalise quartet case variants, remove duplicate
  * quartet declarations, append missing members and preserve the legacy
@@ -133,6 +213,7 @@ export function retargetToolChoice(body, map) {
 export function applyFingerprintTools(body, flat) {
   if (!body || typeof body !== "object") return new Map();
 
+  canonicalizeHistoryTools(body);
   const hadClientTools = Array.isArray(body.tools) && body.tools.length > 0;
   const { tools, map } = concealFingerprintToolNames(body.tools);
   body.tools = appendMissingFingerprintTools(tools, flat);

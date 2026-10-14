@@ -9,7 +9,7 @@
 // or the official API and stay in the opencode-go / deepseek real suites.
 //
 // The free tier only accepts requests carrying the client fingerprint
-// (opencode UA + session header + stream:true + bash/glob/grep/read quartet);
+// (opencode UA + session header + stream:true + bash/edit/read/write quartet);
 // the opencode-zen executor injects all of it, which is part of what this
 // smoke verifies.
 //

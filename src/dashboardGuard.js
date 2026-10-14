@@ -22,6 +22,9 @@ async function hasValidCliToken(request) {
 // Public API paths — no auth required (LLM API has its own key auth inside handler).
 const PUBLIC_API_PATHS = [
   "/api/health",
+  // Payment webhook endpoints authenticate with LICENSE_API_SECRET themselves.
+  "/api/license/activate",
+  "/api/license/renew",
   "/api/init",
   "/api/locale",
   "/api/auth/login",

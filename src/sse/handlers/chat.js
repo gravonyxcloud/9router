@@ -8,7 +8,7 @@ import {
   isValidApiKey,
 } from "../services/auth.js";
 import { handleAntigravityQuotaError, clearAntigravityStrikes } from "../services/antigravityQuota.js";
-import { getSettings } from "@/lib/localDb";
+import { getSettings, getApiKeyByKey, getHourlyTokenUsage, validateApiKey } from "@/lib/localDb";
 import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleChatCore } from "open-sse/handlers/chatCore.js";
 import { DEFAULT_HEADROOM_URL } from "@/lib/headroom/detect";
@@ -26,6 +26,7 @@ import { updateProviderCredentials, checkAndRefreshToken } from "../services/tok
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
 import { getKeyAccessContext, enforceKeyAccess, filterAdapterModels } from "../services/keyAccess.js";
+import { applyCodingAgentBehavior } from "../agent-orchestrator.js";
 
 /**
  * Handle chat completion request
@@ -82,6 +83,32 @@ export async function handleChat(request, clientRawRequest = null) {
     }
   }
 
+  // Commercial licenses must always pass expiry/active validation, even when
+  // the general requireApiKey setting is disabled for local development.
+  if (apiKey) {
+    const license = await getApiKeyByKey(apiKey);
+    if (license?.plan && !(await validateApiKey(apiKey))) {
+      return errorResponse(HTTP_STATUS.UNAUTHORIZED, "API license expired or inactive");
+    }
+  }
+
+  // Commercial licenses have a rolling 60-minute token policy. We use persisted
+  // gateway usage and a conservative estimate of this request before routing.
+  if (apiKey) {
+    const license = await getApiKeyByKey(apiKey);
+    if (license?.plan && license?.hourlyTokenLimit) {
+      const usage = await getHourlyTokenUsage(apiKey);
+      const serializedBody = JSON.stringify(body || {});
+      const estimatedInput = Math.ceil(serializedBody.length / 4);
+      const requestedOutput = Number(body.max_tokens ?? body.max_completion_tokens ?? body.max_output_tokens ?? 0);
+      const estimatedRequest = estimatedInput + (Number.isFinite(requestedOutput) && requestedOutput > 0 ? requestedOutput : 0);
+      if (usage.used >= usage.limit || usage.used + estimatedRequest > usage.limit) {
+        return errorResponse(HTTP_STATUS.RATE_LIMITED,
+          `Hourly token limit reached. Limit: ${usage.limit}; used in the last hour: ${usage.used}. Try again after older usage leaves the rolling 60-minute window.`);
+      }
+    }
+  }
+
   if (!modelStr) {
     log.warn("CHAT", "Missing model");
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing model");
@@ -96,6 +123,11 @@ export async function handleChat(request, clientRawRequest = null) {
 
   // Bypass naming/warmup requests before combo rotation to avoid wasting rotation slots
   const userAgent = request?.headers?.get("user-agent") || "";
+  const agentBehavior = applyCodingAgentBehavior(body, userAgent);
+  if (agentBehavior.applied) {
+    body = agentBehavior.body;
+    log.info("AGENT", `Coding-agent workflow enabled (${agentBehavior.reason})`);
+  }
   const bypassResponse = handleBypassRequest(body, modelStr, userAgent, !!settings.ccFilterNaming);
   if (bypassResponse) return bypassResponse.response || bypassResponse;
 
@@ -232,6 +264,12 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
 
   const { provider, model } = modelInfo;
 
+  // Egress alias: client-facing responses echo the requested model name so
+  // routing (combos, adapters, provider splits) never reveals the real
+  // upstream model id. body.model still holds the original client string
+  // here (combo expansion never mutates it; line 314 below copies first).
+  const displayModel = typeof body?.model === "string" && body.model ? body.model : modelStr;
+
   // Routing shown in the unified "▶" line (client model → provider/model)
 
   // Extract userAgent from request
@@ -281,6 +319,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     const result = await handleChatCore({
       body: { ...body, model: `${provider}/${model}` },
       modelInfo: { provider, model },
+      displayModel,
       credentials: refreshedCredentials,
       log,
       clientRawRequest,

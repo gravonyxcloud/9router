@@ -103,6 +103,8 @@ export function createDisconnectAwareStream(transformStream, streamController, o
   const reader = transformStream.readable.getReader();
   const writer = transformStream.writable.getWriter();
   let terminalEmitted = false;
+  let keepaliveTimer = null;
+  let downstreamController = null;
 
   // Emit a synthesized terminal payload (e.g. Responses response.failed + [DONE]) once
   const emitTerminal = (controller) => {
@@ -115,8 +117,14 @@ export function createDisconnectAwareStream(transformStream, streamController, o
   };
 
   return new ReadableStream({
+    start(controller) {
+      downstreamController = controller;
+      const encoder = new TextEncoder();
+      keepaliveTimer = setInterval(() => { try { if (streamController.isConnected()) controller.enqueue(encoder.encode(": ping\n")); } catch {} }, 12000);
+    },
     async pull(controller) {
       if (!streamController.isConnected()) {
+        if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
         emitTerminal(controller);
         controller.close();
         return;
@@ -126,12 +134,14 @@ export function createDisconnectAwareStream(transformStream, streamController, o
         const { done, value } = await reader.read();
 
         if (done) {
+          if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
           streamController.handleComplete();
           controller.close();
           return;
         }
         controller.enqueue(value);
       } catch (error) {
+        if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
         const wasConnected = streamController.isConnected();
         // Controller already closed = downstream ended; not an upstream error, skip noisy log.
         const msg0 = error?.message || "";
@@ -169,6 +179,7 @@ export function createDisconnectAwareStream(transformStream, streamController, o
     },
 
     cancel(reason) {
+      if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
       streamController.handleDisconnect(reason || "cancelled");
       reader.cancel();
       writer.abort();

@@ -15,6 +15,7 @@ export default function CustomConfigCard({ providerId }) {
   const [rows, setRows] = useState([{ name: "", value: "" }]);
   const [builtin, setBuiltin] = useState({});
   const [hasOverride, setHasOverride] = useState(false);
+  const [fingerprint, setFingerprint] = useState([]);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -30,6 +31,7 @@ export default function CustomConfigCard({ providerId }) {
         setBuiltin(builtinHeaders);
         setRows(headerRows.length ? headerRows : [{ name: "", value: "" }]);
         setHasOverride(Object.keys(data.headers || {}).length > 0);
+        setFingerprint(Array.isArray(data.fingerprint) ? data.fingerprint : []);
       })
       .catch(() => {});
     return () => { cancelled = true; };
@@ -170,6 +172,30 @@ export default function CustomConfigCard({ providerId }) {
               </button>
             </div>
           </div>
+
+          {fingerprint.length > 0 && (
+            <div className="mt-3 border-t border-border pt-3">
+              <p className="mb-2 text-xs font-medium text-text-muted">
+                Upstream fingerprint actually sent (automatic + built-in + custom)
+              </p>
+              <div className="flex flex-col gap-1.5">
+                {fingerprint.map((item) => (
+                  <div key={item.name} className="flex min-w-0 items-center gap-2 text-xs">
+                    <span className="shrink-0 font-mono text-text-main">{item.name}</span>
+                    <span className="min-w-0 flex-1 truncate font-mono text-text-muted" title={item.value}>
+                      {item.value}
+                    </span>
+                    <Badge
+                      variant={item.source === "custom" ? "success" : "default"}
+                      size="sm"
+                    >
+                      {item.source}
+                    </Badge>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </Card>

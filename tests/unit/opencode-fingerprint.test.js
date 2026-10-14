@@ -21,7 +21,8 @@ describe("opencodeFingerprint — request side", () => {
 
     expect(names).toContain("bash");
     expect(names).not.toContain("Bash");
-    expect(names).toContain("Edit");
+    expect(names).toContain("edit");
+    expect(names).not.toContain("Edit");
     expect(map.get("bash")).toBe("Bash");
   });
 
@@ -78,8 +79,8 @@ describe("opencodeFingerprint — request side", () => {
     applyFingerprintTools(body, true);
 
     const names = body.tools.map((tool) => tool.name);
-    expect(names).toContain("glob");
-    expect(names).toContain("grep");
+    expect(names).toContain("edit");
+    expect(names).toContain("write");
     expect(names).toContain("terminal");
     expect(body.tools).toHaveLength(5);
   });
@@ -103,6 +104,61 @@ describe("opencodeFingerprint — request side", () => {
     const body = { tools: flat(CC_TOOLS) };
     const map = applyFingerprintTools(body, true);
     expect(takeRenamedToolNames(body)).toBe(map);
+  });
+
+  it("appends quartet members with authentic schemas (no dummy parameters)", () => {
+    const body = { tools: [] };
+    applyFingerprintTools(body, false);
+
+    for (const tool of body.tools) {
+      const fn = tool.function;
+      expect(typeof fn.description).toBe("string");
+      expect(fn.description.length).toBeGreaterThan(20);
+      expect(fn.parameters?.type).toBe("object");
+      expect(Object.keys(fn.parameters?.properties || {}).length).toBeGreaterThan(0);
+    }
+  });
+
+  it("re-schematises renamed client tools to the authentic definitions", () => {
+    const body = {
+      tools: [{ type: "function", function: { name: "Bash", description: "foreign", parameters: { type: "object", properties: {} } } }],
+    };
+    applyFingerprintTools(body, false);
+
+    const bash = body.tools.find((t) => t.function?.name === "bash");
+    expect(bash.function.description).not.toBe("foreign");
+    expect(Object.keys(bash.function.parameters?.properties || {}).length).toBeGreaterThan(0);
+  });
+
+  it("canonicalises history tool calls to lowercase names and camelCase args", () => {
+    const body = {
+      tools: [],
+      messages: [
+        { role: "user", content: "hi" },
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [{
+            id: "toolu_1",
+            type: "function",
+            function: {
+              name: "Edit",
+              arguments: JSON.stringify({ file_path: "a.txt", old_string: "x", new_string: "y" }),
+            },
+          }],
+        },
+        { role: "tool", tool_call_id: "toolu_1", content: "ok" },
+      ],
+    };
+    applyFingerprintTools(body, false);
+
+    const call = body.messages[1].tool_calls[0];
+    expect(call.function.name).toBe("edit");
+    expect(JSON.parse(call.function.arguments)).toEqual({
+      filePath: "a.txt",
+      oldString: "x",
+      newString: "y",
+    });
   });
 
   it("never throws on malformed tools", () => {
@@ -182,9 +238,9 @@ describe("fingerprintToolKey", () => {
   it("maps quartet case/whitespace variants and rejects other tools", () => {
     expect(fingerprintToolKey("Bash")).toBe("bash");
     expect(fingerprintToolKey(" bash ")).toBe("bash");
-    expect(fingerprintToolKey("GLOB")).toBe("glob");
-    expect(fingerprintToolKey("Read")).toBe("read");
-    expect(fingerprintToolKey("Edit")).toBe("");
+    expect(fingerprintToolKey("EDIT")).toBe("edit");
+    expect(fingerprintToolKey("Write")).toBe("write");
+    expect(fingerprintToolKey("Glob")).toBe("");
     expect(fingerprintToolKey("terminal")).toBe("");
     expect(fingerprintToolKey(null)).toBe("");
   });

@@ -32,6 +32,8 @@ import { stripUnsupportedModalities } from "../translator/concerns/modality.js";
 import { prefetchRemoteImages } from "../translator/concerns/prefetch.js";
 import { defaultClaudeToolType, shouldDefaultClaudeToolType } from "../translator/concerns/toolCall.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
+import { resolveProxyFailoverOptions } from "../../src/lib/network/connectionProxy.js";
+import { noteProxyPoolResult } from "../../src/lib/network/proxyHealth.js";
 
 /**
  * Core chat handler - shared between SSE and Worker
@@ -60,7 +62,7 @@ export function stripContinuityFields(body) {
   return body;
 }
 
-export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, headroomTimeoutMs, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, providerOverrides }) {
+export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, headroomTimeoutMs, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, providerOverrides, displayModel }) {
   const { provider, model } = modelInfo;
   const requestStartTime = Date.now();
   // Stable per-session color so all lines of one CLI conversation share a tag
@@ -74,6 +76,51 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const reqTag = log?.tagForSession ? log.tagForSession(sessionSeed) : (log?.nextTag ? log.nextTag() : "");
 
   const sourceFormat = sourceFormatOverride || detectFormat(body);
+
+  // Central token budget: apply model-specific limits to every common API
+  // dialect before translation. Keep aliases synchronized so a downstream
+  // translator cannot accidentally restore an oversized value.
+  const modelCaps = getCapabilitiesForModel(provider, model);
+  const outputKeys = ["max_tokens", "max_completion_tokens", "max_output_tokens"];
+  const outputCeiling = Number(modelCaps?.maxOutput);
+  if (Number.isFinite(outputCeiling) && outputCeiling > 0) {
+    for (const key of outputKeys) {
+      const requested = Number(body?.[key]);
+      if (Number.isFinite(requested) && requested > outputCeiling) {
+        log?.info?.("TOKENS", `${provider}/${model}: ${key} ${requested} → ${outputCeiling} (model output ceiling)`);
+        body[key] = outputCeiling;
+      }
+    }
+    // Claude requires max_tokens > thinking.budget_tokens. Clamp thinking first
+    // rather than letting the translator silently push output beyond the model.
+    if (body.thinking && Number.isFinite(Number(body.thinking.budget_tokens))) {
+      const budget = Number(body.thinking.budget_tokens);
+      if (budget >= outputCeiling) {
+        body.thinking = { ...body.thinking, budget_tokens: Math.max(0, outputCeiling - 1024) };
+        log?.info?.("TOKENS", `${provider}/${model}: thinking budget reduced to fit output ceiling`);
+      }
+    }
+  }
+  // A conservative serialized-size estimate catches obvious context overflows.
+  // This is diagnostic only: image/audio tokenization varies by provider, so
+  // never destructively prune messages based on character counts alone.
+  try {
+    const serializedChars = JSON.stringify(body).length;
+    const estimatedInput = Math.ceil(serializedChars / 4);
+    const contextWindow = Number(modelCaps?.contextWindow);
+    if (Number.isFinite(contextWindow) && contextWindow > 0) {
+      const outputReserve = Math.min(
+        Number.isFinite(outputCeiling) && outputCeiling > 0 ? outputCeiling : 4096,
+        Math.max(1024, Math.floor(contextWindow * 0.2))
+      );
+      const inputBudget = Math.max(1, contextWindow - outputReserve);
+      if (estimatedInput > inputBudget) {
+        log?.warn?.("TOKENS", `${provider}/${model}: estimated input ${estimatedInput} tokens exceeds safe context budget ${inputBudget} (window ${contextWindow}); history may need pruning`);
+      } else {
+        log?.debug?.("TOKENS", `${provider}/${model}: estimated input ${estimatedInput}/${inputBudget}; output ceiling ${outputCeiling || "provider-defined"}`);
+      }
+    }
+  } catch { /* diagnostics must never break a request */ }
 
   // Check for bypass patterns (warmup, skip, cc naming)
   const bypassResponse = handleBypassRequest(body, model, userAgent, ccFilterNaming);
@@ -350,9 +397,28 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     vercelRelayUrl: credentials?.providerSpecificData?.vercelRelayUrl || "",
   };
 
+  // Smart rotation: when the primary proxy dies, fail over to other active
+  // pools (sticky working pool first, failure cooldown respected) instead of
+  // leaking to direct — and forward pool identity/strictness so the fetch
+  // layer can report results and honor fail-closed pools. Fail-open: any
+  // resolution failure keeps the single-proxy behavior above.
+  try {
+    const failover = await resolveProxyFailoverOptions(credentials, provider);
+    if (failover) {
+      proxyOptions.connectionProxyUrl = failover.connectionProxyUrl;
+      proxyOptions.connectionNoProxy = failover.connectionNoProxy || proxyOptions.connectionNoProxy;
+      proxyOptions.proxyPoolId = failover.proxyPoolId;
+      proxyOptions.strictProxy = failover.strictProxy;
+      proxyOptions.proxyScope = failover.proxyScope;
+      proxyOptions.proxyFailovers = failover.proxyFailovers;
+    }
+  } catch {
+    // keep single-proxy behavior
+  }
+
   if (proxyOptions.vercelRelayUrl) {
     const connectionName = credentials?.connectionName || credentials?.connectionId || "unknown";
-    const poolId = credentials?.providerSpecificData?.connectionProxyPoolId || "none";
+    const poolId = proxyOptions.proxyPoolId || credentials?.providerSpecificData?.connectionProxyPoolId || "none";
     log?.info?.("PROXY", `${provider.toUpperCase()} | ${model} | conn=${connectionName} | pool=${poolId} | vercel-relay=${proxyOptions.vercelRelayUrl}`);
   } else if (proxyOptions.connectionProxyEnabled && proxyOptions.connectionProxyUrl) {
     let maskedProxyUrl = proxyOptions.connectionProxyUrl;
@@ -366,7 +432,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       // Keep raw if URL parsing fails
     }
 
-    const poolId = credentials?.providerSpecificData?.connectionProxyPoolId || "none";
+    const poolId = proxyOptions.proxyPoolId || credentials?.providerSpecificData?.connectionProxyPoolId || "none";
     const connectionName = credentials?.connectionName || credentials?.connectionId || "unknown";
     log?.info?.("PROXY", `${provider.toUpperCase()} | ${model} | conn=${connectionName} | pool=${poolId} | url=${maskedProxyUrl}`);
   }
@@ -399,6 +465,16 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     providerHeaders = result.headers;
     finalBody = result.transformedBody;
     providerResponseFormat = result.responseFormat || targetFormat;
+    // Upstream rate/gate signals (429/403) may mean this egress IP is burned:
+    // drop the sticky proxy (next request rotates) and start its cooldown.
+    // Account-quota 429s land here too — rotating on them is harmless.
+    if (providerResponse && (providerResponse.status === 429 || providerResponse.status === 403)) {
+      try {
+        noteProxyPoolResult(proxyOptions?.proxyScope || null, proxyOptions?.proxyPoolId || null, false);
+      } catch {
+        // never break the response path
+      }
+    }
     const renamedToolNames = takeRenamedToolNames(translatedBody);
     if (renamedToolNames?.size) {
       toolNameMap = new Map([...(toolNameMap || []), ...renamedToolNames]);
@@ -502,7 +578,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     return createErrorResult(statusCode, errMsg, resetsAtMs, upstreamResponseHeaders(providerResponse.headers));
   }
 
-  const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag, log };
+  const sharedCtx = { provider, model, displayModel: typeof displayModel === "string" && displayModel ? displayModel : null, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag, log };
   const appendLog = (extra) => appendRequestLog({ model, provider, connectionId, ...extra }).catch(() => { });
   const trackDone = () => trackPendingRequest(model, provider, connectionId, false);
 

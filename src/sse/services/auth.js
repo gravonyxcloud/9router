@@ -51,7 +51,13 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       let pickedId = override.proxyPoolId || null;
       if (strategy !== "none") {
         const allPools = await getProxyPools({ isActive: true });
-        const poolIds = allPools.filter(p => p.proxyUrl).map(p => p.id);
+        const usable = allPools.filter(p => p.proxyUrl);
+        // Prefer pools proven working against OpenCode itself, then generic
+        // testStatus=active, then anything usable. Auto-health refreshes
+        // both signals continuously; fallbacks keep traffic flowing cold.
+        const opencodeOk = usable.filter(p => p.opencodeOk === true);
+        const healthy = usable.filter(p => p.testStatus === "active");
+        const poolIds = (opencodeOk.length ? opencodeOk : healthy.length ? healthy : usable).map(p => p.id);
         pickedId = pickProxyPoolId(poolIds, strategy, providerId);
       }
       const resolvedProxy = await resolveConnectionProxyConfig({ proxyPoolId: pickedId || "" });

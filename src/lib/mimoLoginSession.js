@@ -458,7 +458,6 @@ async function socksFetch(url, init, proxyUrl) {
   // Literal specifiers on both branches — webpack forbids fully dynamic import().
   const protoMod = nodeUrl.protocol === "http:" ? await import("node:http") : await import("node:https");
   const lib = protoMod.default ?? protoMod;
-  const { Readable } = await import("node:stream");
 
   let headers = {};
   const raw = init?.headers;
@@ -471,18 +470,40 @@ async function socksFetch(url, init, proxyUrl) {
 
   const agent = new SocksProxyAgent(proxyUrl);
   return new Promise((resolve, reject) => {
-    const req = lib.request(
-      nodeUrl,
-      { method: init?.method || "GET", agent, headers, timeout: 20000 },
-      (res) => {
-        const outHeaders = new Headers();
-        for (const [k, v] of Object.entries(res.headers || {})) {
-          if (Array.isArray(v)) v.forEach((x) => outHeaders.append(k, String(x)));
-          else if (v != null) outHeaders.set(k, String(v));
-        }
-        resolve(new Response(Readable.toWeb(res), { status: res.statusCode || 200, headers: outHeaders }));
-      },
-    );
+    let req;
+    try {
+      req = lib.request(
+        nodeUrl,
+        { method: init?.method || "GET", agent, headers, timeout: 20000 },
+        (res) => {
+          try {
+            const outHeaders = new Headers();
+            for (const [k, v] of Object.entries(res.headers || {})) {
+              if (Array.isArray(v)) v.forEach((x) => outHeaders.append(k, String(x)));
+              else if (v != null) outHeaders.set(k, String(v));
+            }
+            // Manual web-stream bridge (no node:stream import: under the Next
+            // server bundle that import can resolve without Readable).
+            const stream = new ReadableStream({
+              start(controller) {
+                res.on("data", (chunk) => controller.enqueue(chunk));
+                res.on("end", () => controller.close());
+                res.on("error", (err) => controller.error(err));
+              },
+              cancel() {
+                try { res.destroy(); } catch { /* ignore */ }
+              },
+            });
+            resolve(new Response(stream, { status: res.statusCode || 200, headers: outHeaders }));
+          } catch (err) {
+            reject(err);
+          }
+        },
+      );
+    } catch (err) {
+      reject(err);
+      return;
+    }
     const signal = init?.signal;
     if (signal) {
       if (signal.aborted) req.destroy(new Error("aborted"));

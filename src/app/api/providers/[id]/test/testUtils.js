@@ -4,6 +4,7 @@ import { testProxyUrl } from "@/lib/network/proxyTest";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS } from "@/shared/constants/providers";
 import { getDefaultModel } from "open-sse/config/providerModels.js";
 import { probeBedrockCredentials } from "open-sse/executors/bedrock.js";
+import { probeOpencodeSidecar } from "open-sse/executors/opencode-sidecar.js";
 import { resolveOllamaLocalHost, PROVIDERS } from "open-sse/config/providers.js";
 import { CODEX_CLI_VERSION } from "open-sse/config/appConstants.js";
 import { GROK_CLI_PAGER_USER_AGENT, GROK_CLI_VERSION } from "open-sse/config/grokCli.js";
@@ -468,10 +469,11 @@ async function testOAuthConnection(connection, effectiveProxy = null) {
 }
 
 async function fetchWithConnectionProxy(url, options = {}, effectiveProxy = null) {
-  // Add a 15-second timeout to prevent connection testing from hanging indefinitely
-  // and exhausting the browser/Node.js connection pools.
+  // Bound connection testing so slow proxy pools don't hang indefinitely and
+  // exhaust the browser/Node.js connection pools. 30s (not 15s): free-tier
+  // probes behind rotating proxies routinely need more than 15s.
   if (!options.signal) {
-    options.signal = AbortSignal.timeout(15000);
+    options.signal = AbortSignal.timeout(30000);
   }
 
   // Vercel relay: forward via relay URL
@@ -798,7 +800,7 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
       }
       case "opencode": {
         const res = await fetchWithConnectionProxy("https://opencode.ai/zen/v1/models", {
-          headers: { Authorization: "Bearer public", "User-Agent": "opencode/1.18.31" },
+          headers: { Authorization: "Bearer public", "User-Agent": "opencode/1.19.0 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14", "x-opencode-client": "cli" },
         }, effectiveProxy);
         return { valid: res.ok, error: res.ok ? null : "OpenCode free tier unavailable" };
       }
@@ -810,6 +812,11 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
         }, effectiveProxy);
         const valid = res.status !== 401 && res.status !== 403;
         return { valid, error: valid ? null : "Invalid API key" };
+      }
+      case "opencode-sidecar": {
+        // Local check only: binary present + reports a version (no network/quota used).
+        const probe = await probeOpencodeSidecar();
+        return { valid: probe.ok, error: probe.ok ? null : (probe.error || "opencode CLI not found — install it and run `opencode auth login`") };
       }
       case "xiaomi-mimo":
       case "xiaomi-tokenplan": {

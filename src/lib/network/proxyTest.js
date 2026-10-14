@@ -1,6 +1,150 @@
 import { ProxyAgent, fetch as undiciFetch } from "undici";
+import { isSocksProxyUrl, isSocksTlsCertError, socksFetch } from "./socksFetch.js";
 
-const DEFAULT_TEST_URL = "https://google.com/";
+export const RELAY_POOL_TYPES = ["vercel", "cloudflare", "deno", "netlify"];
+
+export function isRelayPoolType(type) {
+  return RELAY_POOL_TYPES.includes(String(type || "").toLowerCase());
+}
+
+/** Probe for relay-type pools (URL rewriting transport, not a real proxy). */
+export async function testRelayUrl(relayUrl, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const startedAt = Date.now();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await undiciFetch(relayUrl, {
+      method: "GET",
+      headers: {
+        "x-relay-target": "https://httpbin.org",
+        "x-relay-path": "/get",
+      },
+      signal: controller.signal,
+    });
+    return {
+      ok: res.ok,
+      status: res.status,
+      statusText: res.statusText,
+      elapsedMs: Date.now() - startedAt,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      status: 500,
+      error: err?.name === "AbortError" ? "Relay test timed out" : (err?.message || String(err)),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Full pool probe: relay transport or real proxy (HTTP/SOCKS). */
+export async function testProxyPool(pool, { timeoutMs = 8000 } = {}) {
+  if (!pool || !pool.proxyUrl) {
+    return { ok: false, status: 400, error: "proxyUrl is required" };
+  }
+  if (isRelayPoolType(pool.type)) {
+    return testRelayUrl(pool.proxyUrl, Math.min(timeoutMs, 10000));
+  }
+  return testProxyUrl({ proxyUrl: pool.proxyUrl, timeoutMs });
+}
+
+const OPENCODE_PROBE_URL = "https://opencode.ai/zen/v1/models";
+const OPENCODE_PROBE_HEADERS = {
+  "User-Agent": "opencode/1.19.0 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14",
+  "x-opencode-client": "cli",
+  Authorization: "Bearer public",
+  Accept: "application/json",
+};
+
+/**
+ * Second-stage probe: can this proxy actually reach OpenCode (not just the
+ * open internet)? A proxy may pass a generic HEAD-to-Google check while its
+ * IP is burned at the upstream (429/403) — useless for 9Router traffic.
+ * Returns { ok, status, gated } where gated=true means the proxy connects
+ * but upstream refuses this egress IP (rate limit / gate).
+ */
+export async function testProxyOpencodeTarget(proxyUrl, { timeoutMs = 8000 } = {}) {
+  const normalized = normalizeString(proxyUrl);
+  if (!normalized) {
+    return { ok: false, gated: false, status: 400, error: "proxyUrl is required" };
+  }
+  const timeoutRaw = Number(timeoutMs);
+  const budget = Number.isFinite(timeoutRaw) && timeoutRaw > 0 ? Math.min(timeoutRaw, 30000) : 8000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), budget);
+  let dispatcher = null;
+  if (!isSocksProxyUrl(normalized)) {
+    try {
+      dispatcher = new ProxyAgent({ uri: normalized });
+    } catch (err) {
+      clearTimeout(timer);
+      return { ok: false, gated: false, status: 400, error: `Invalid proxy URL: ${err?.message || String(err)}` };
+    }
+  }
+  const isStrictTls = process.env.STRICT_SSL === "true" || process.env.STRICT_SSL === "1";
+  const attempt = async (insecure) => {
+    const init = { method: "GET", headers: { ...OPENCODE_PROBE_HEADERS }, signal: controller.signal };
+    let res;
+    if (isSocksProxyUrl(normalized)) {
+      res = await socksFetch(OPENCODE_PROBE_URL, init, normalized, { timeoutMs: budget, insecure });
+    } else {
+      const dispatch = insecure
+        ? new ProxyAgent({ uri: normalized, requestTls: { rejectUnauthorized: false } })
+        : dispatcher;
+      try {
+        res = await undiciFetch(OPENCODE_PROBE_URL, { ...init, dispatcher: dispatch });
+      } finally {
+        if (dispatch !== dispatcher) {
+          try { await dispatch.close?.(); } catch { /* ignore */ }
+        }
+      }
+    }
+    return res;
+  };
+  try {
+    let res;
+    try {
+      res = await attempt(false);
+    } catch (err) {
+      // Health check probes the proxy, not the target's PKI: retry without
+      // cert verification (mirrors proxyAwareFetch TLS fallback).
+      if (!isStrictTls && isSocksTlsCertError(err)) {
+        res = await attempt(true);
+      } else {
+        throw err;
+      }
+    }
+    // Drain a bounded prefix so keep-alive sockets don't pile up; the verdict
+    // comes from the status code (catalog body is irrelevant here).
+    try {
+      if (res.body && typeof res.body.getReader === "function") {
+        const reader = res.body.getReader();
+        await reader.read();
+        try { await reader.cancel(); } catch { /* ignore */ }
+      }
+    } catch { /* ignore */ }
+    if (res.status === 429 || res.status === 403) {
+      return { ok: false, gated: true, status: res.status, error: `OpenCode gated this egress IP (HTTP ${res.status})` };
+    }
+    if (!res.ok) {
+      return { ok: false, gated: false, status: res.status, error: `OpenCode probe HTTP ${res.status}` };
+    }
+    return { ok: true, gated: false, status: res.status, elapsedMs: 0 };
+  } catch (err) {
+    const message = err?.name === "AbortError" ? "OpenCode probe timed out" : getErrorMessage(err);
+    return { ok: false, gated: false, status: 500, error: message || "OpenCode probe failed" };
+  } finally {
+    clearTimeout(timer);
+    try {
+      await dispatcher?.close?.();
+    } catch {
+      // ignore
+    }
+  }
+}
+
+const DEFAULT_TEST_URL = "http://www.google.com/generate_204";
 const DEFAULT_TIMEOUT_MS = 8000;
 
 function getErrorMessage(err) {
@@ -40,6 +184,55 @@ export async function testProxyUrl({ proxyUrl, testUrl, timeoutMs } = {}) {
 
   let dispatcher;
 
+  // SOCKS4/SOCKS5 go through socks-proxy-agent (undici ProxyAgent only
+  // speaks HTTP CONNECT). This genuinely exercises the SOCKS handshake —
+  // a proxy that only claims the type but refuses the protocol fails here.
+  if (isSocksProxyUrl(normalizedProxyUrl)) {
+    const controller = new AbortController();
+    const startedAt = Date.now();
+    const timer = setTimeout(() => controller.abort(), normalizedTimeoutMs);
+    const attempt = (insecure) => socksFetch(
+      normalizedTestUrl,
+      {
+        method: "GET",
+        signal: controller.signal,
+        headers: { "User-Agent": "9Router" },
+      },
+      normalizedProxyUrl,
+      { timeoutMs: normalizedTimeoutMs, insecure },
+    );
+    try {
+      let res;
+      try {
+        res = await attempt(false);
+      } catch (err) {
+        // Health check probes the proxy, not the target's PKI: retry
+        // without cert verification (mirrors proxyAwareFetch TLS fallback),
+        // unless the operator pinned strict TLS.
+        const strictTls = process.env.STRICT_SSL === "true" || process.env.STRICT_SSL === "1";
+        if (!strictTls && isSocksTlsCertError(err)) {
+          res = await attempt(true);
+        } else {
+          throw err;
+        }
+      }
+      return {
+        ok: res.ok,
+        status: res.status,
+        statusText: "",
+        url: normalizedTestUrl,
+        elapsedMs: Date.now() - startedAt,
+      };
+    } catch (err) {
+      const detail = err?.name === "AbortError" || /abort/i.test(err?.message || "")
+        ? "Proxy test timed out"
+        : getErrorMessage(err);
+      return { ok: false, status: 500, error: detail || "Proxy test failed" };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   try {
     try {
       dispatcher = new ProxyAgent({ uri: normalizedProxyUrl });
@@ -57,7 +250,7 @@ export async function testProxyUrl({ proxyUrl, testUrl, timeoutMs } = {}) {
 
     try {
       const res = await undiciFetch(normalizedTestUrl, {
-        method: "HEAD",
+        method: "GET",
         dispatcher,
         signal: controller.signal,
         headers: {

@@ -6,7 +6,26 @@ import { ERROR_TYPES, DEFAULT_ERROR_MESSAGES } from "../config/errorConfig.js";
  * @param {string} message - Error message
  * @returns {object} Error response object
  */
+function sanitizePublicError(message, statusCode) {
+  const raw = typeof message === "string" ? message : "";
+  // Never expose internal upstream/provider IDs or raw upstream payloads to API clients.
+  const safe = raw
+    .replace(/\b(?:opencode-zen|openrouter|anthropic|openai|claude-haiku-4-5)\/[a-z0-9._:-]+/gi, "the configured provider")
+    .replace(/Upstream request failed:\s*/gi, "The configured provider rejected the request: ")
+    .replace(/Insufficient account funds/gi, "The configured provider has insufficient credits")
+    .replace(/\s*\(cause:\s*[^)]*\)/gi, "")
+    .replace(/\b(?:provider|upstream)\s*[:=]\s*[^,;\s}]+/gi, "provider=[redacted]");
+  if (!safe || /\[object Object\]/i.test(safe)) {
+    if (statusCode === 402) return "The configured provider has insufficient credits or quota.";
+    if (statusCode === 401 || statusCode === 403) return "The configured provider rejected authorization.";
+    if (statusCode >= 500) return "The configured provider is temporarily unavailable.";
+    return "The request could not be completed.";
+  }
+  return safe.slice(0, 500);
+}
+
 export function buildErrorBody(statusCode, message) {
+  const safeMessage = sanitizePublicError(message, statusCode);
   const errorInfo = ERROR_TYPES[statusCode] || 
     (statusCode >= 500 
       ? { type: "server_error", code: "internal_server_error" }
@@ -14,7 +33,7 @@ export function buildErrorBody(statusCode, message) {
 
   return {
     error: {
-      message: message || DEFAULT_ERROR_MESSAGES[statusCode] || "An error occurred",
+      message: safeMessage || DEFAULT_ERROR_MESSAGES[statusCode] || "The request could not be completed.",
       type: errorInfo.type,
       code: errorInfo.code
     }

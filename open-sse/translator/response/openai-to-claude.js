@@ -3,6 +3,7 @@ import { FORMATS } from "../formats.js";
 import { ROLE, CLAUDE_BLOCK, MODEL_FALLBACK } from "../schema/index.js";
 import { fromOpenAIFinish } from "../concerns/finishReason.js";
 import { extractReasoningText } from "../concerns/reasoning.js";
+import { sanitizeQuartetArgs } from "../concerns/toolArgs.js";
 
 // Legacy "proxy_" prefix used by older request translators. Response strips it
 // defensively so tool names from such turns resolve back (e.g. proxy_Read → Read
@@ -10,21 +11,27 @@ import { extractReasoningText } from "../concerns/reasoning.js";
 // is then a no-op. Kept intentionally; do NOT couple to request's empty prefix.
 const CLAUDE_OAUTH_TOOL_PREFIX = "proxy_";
 
-// Sanitize tool call arguments to fix bad params from non-Anthropic models
+// Sanitize tool call arguments to fix bad params from non-Anthropic models.
+// Upstream OpenCode-family models emit their native camelCase conventions
+// (filePath/oldString/newString/replaceAll/cmd); Claude Code validates tool
+// input strictly and rejects those ("The edit tool is rejecting these
+// parameters"), so quartet args are mapped to the snake_case spellings agent
+// clients expect (see concerns/toolArgs.js).
 function sanitizeToolArgs(toolName, argsJson) {
   try {
     const args = JSON.parse(argsJson);
     const name = toolName.startsWith(CLAUDE_OAUTH_TOOL_PREFIX)
       ? toolName.slice(CLAUDE_OAUTH_TOOL_PREFIX.length)
       : toolName;
-    if (name === "Read") sanitizeReadArgs(args);
+    sanitizeQuartetArgs(name, args);
+    if (String(name || "").toLowerCase() === "read") sanitizeLegacyReadArgs(args);
     return JSON.stringify(args);
   } catch {
     return argsJson;
   }
 }
 
-function sanitizeReadArgs(args) {
+function sanitizeLegacyReadArgs(args) {
   if (typeof args.limit === "string" && /^\d+$/.test(args.limit)) args.limit = Number(args.limit);
   if (typeof args.offset === "string" && /^-?\d+$/.test(args.offset)) args.offset = Number(args.offset);
 

@@ -1,12 +1,16 @@
 import crypto from "crypto";
 import { BaseExecutor } from "./base.js";
 import { PROVIDERS } from "../config/providers.js";
-import { MEMORY_CONFIG } from "../config/runtimeConfig.js";
 import { getThinkingLevels } from "../providers/thinkingLevels.js";
 import { injectReasoningContent } from "../utils/reasoningContentInjector.js";
-import { resolveSessionId } from "../utils/sessionManager.js";
 import { isMuseSparkModel } from "../providers/models/helpers.js";
 import { applyFingerprintTools } from "../utils/opencodeFingerprint.js";
+import {
+  mintOpencodeSessionId,
+  stableOpencodeSession,
+  opencodeConversationKey,
+  opencodeIdentityKey,
+} from "../utils/opencodeSession.js";
 import { ANTHROPIC_API_VERSION } from "../providers/shared.js";
 import {
   normalizeResponsesInput,
@@ -15,7 +19,7 @@ import {
   coerceResponsesOutput,
 } from "../translator/formats/responsesApi.js";
 
-const OPENCODE_UA = "opencode/1.18.31";
+export const OPENCODE_UA = "opencode/1.19.0 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14";
 const MAX_SESSION_LENGTH = 256;
 const MAX_TOOL_NAME_LEN = 128;
 const SESSION_HEADER = "x-opencode-session";
@@ -32,15 +36,12 @@ function hasValidOpencodeVersion(ua) {
   const minor = parseInt(m[2], 10);
   return major > 1 || (major === 1 && minor >= 17);
 }
-// Models served by /zen/v1/responses; every other model stays on /chat/completions.
+// Models served by /inference/v1/responses; every other model stays on /chat/completions.
 const RESPONSES_MODELS = new Set([
   "muse-spark-1.2-contributor-free",
   "muse-spark-1.3-contributor-free",
 ]);
 const MESSAGES_MODELS = new Set(["union-alpha"]);
-
-let lastTimestamp = 0;
-let counter = 0;
 
 function unstableRandom() {
   const bytes = crypto.randomBytes(14);
@@ -51,21 +52,9 @@ function unstableRandom() {
   return randomPart;
 }
 
+// Canonical client mint (matches the real CLI ascending-ID scheme).
 export function generateSessionId(timestamp = Date.now()) {
-  if (timestamp !== lastTimestamp) {
-    lastTimestamp = timestamp;
-    counter = 0;
-  }
-  counter++;
-
-  const current = BigInt(timestamp) * 0x1000n + BigInt(counter);
-  const value = ~current;
-  const time = Array.from({ length: 6 }, (_, index) =>
-    Number((value >> BigInt(40 - 8 * index)) & 0xffn)
-      .toString(16)
-      .padStart(2, "0")
-  ).join("");
-  return `ses_${time}${unstableRandom()}`;
+  return mintOpencodeSessionId(timestamp);
 }
 
 export function generateRequestId(timestamp = Date.now()) {
@@ -79,20 +68,35 @@ export function generateRequestId(timestamp = Date.now()) {
   return `msg_${time}${unstableRandom()}`;
 }
 
+// Legacy hash mapping (kept for unit-test compatibility). NOTE: upstream's
+// free-tier gate rejects sha-derived ids (no valid timestamp structure), so
+// this must NOT be used for live x-opencode-session values — use the stable
+// canonical mint below instead.
+// Legacy mapper (kept for compatibility). Produces structurally valid
+// canonical ids: ~-timestamp prefix like a genuine client mint, memoized per
+// input so conversations keep a stable session. NOTE: live traffic uses the
+// stable canonical mint (resolveOpencodeSession), not this function —
+// upstream's free-tier gate rejects hash-derived ids without valid
+// timestamps, which is what the old pure-sha version emitted.
+const translateCache = new Map();
+const TRANSLATE_CACHE_MAX = 500;
 export function translateSessionId(sessionId, clientTool = "") {
   if (typeof sessionId === "string" && OPENCODE_SESSION_RE.test(sessionId.trim())) {
     return sessionId.trim();
   }
-  const digest = crypto
-    .createHash("sha256")
-    .update(`opencode\0${clientTool || "generic"}\0${sessionId || ""}`)
-    .digest();
-  const timeHex = digest.subarray(0, 6).toString("hex");
-  let randomPart = "";
-  for (let i = 6; i < 20; i++) {
-    randomPart += BASE62_CHARS[digest[i] % 62];
+  const key = `${clientTool || "generic"}\0${sessionId || ""}`;
+  const hit = translateCache.get(key);
+  if (hit) {
+    translateCache.delete(key);
+    translateCache.set(key, hit);
+    return hit;
   }
-  return `ses_${timeHex}${randomPart}`;
+  const minted = mintOpencodeSessionId();
+  if (translateCache.size >= TRANSLATE_CACHE_MAX) {
+    translateCache.delete(translateCache.keys().next().value);
+  }
+  translateCache.set(key, minted);
+  return minted;
 }
 
 function normalizeSession(value) {
@@ -117,47 +121,10 @@ function nativeSession(headers) {
 // x-opencode-session on every request burns through it and surfaces as
 // 429 FreeUsageLimitError with growing reset-after delays, while the real
 // CLI reuses one long-lived canonical session per conversation. Mirror
-// that: one stable canonical session per downstream identity, evicted
-// after MEMORY_CONFIG.sessionTtlMs like the other session stores.
-const stableOpencodeSessions = new Map();
-const MAX_STABLE_SESSIONS = 1000;
-const stableSessionCleanup = setInterval(() => {
-  const now = Date.now();
-  for (const [key, entry] of stableOpencodeSessions) {
-    if (now - entry.lastUsed > MEMORY_CONFIG.sessionTtlMs) {
-      stableOpencodeSessions.delete(key);
-    }
-  }
-}, MEMORY_CONFIG.sessionCleanupIntervalMs);
-if (stableSessionCleanup.unref) stableSessionCleanup.unref();
-
-function identityKey(credentials) {
-  const connectionId = credentials?.connectionId || credentials?.id;
-  if (connectionId) return `opencode:conn:${String(connectionId).slice(0, 128)}`;
-  const raw = credentials?.rawHeaders || {};
-  const auth = raw.authorization || raw.Authorization || raw["x-api-key"] || raw["X-Api-Key"] || "";
-  if (auth) {
-    const digest = crypto.createHash("sha256").update(String(auth)).digest("hex").slice(0, 32);
-    return `opencode:auth:${digest}`;
-  }
-  return "opencode:default";
-}
-
+// that: one stable canonical session per downstream identity/conversation
+// (shared store in ../utils/opencodeSession.js).
 export function stableSessionId(credentials) {
-  const key = identityKey(credentials);
-  const existing = stableOpencodeSessions.get(key);
-  if (existing) {
-    existing.lastUsed = Date.now();
-    stableOpencodeSessions.delete(key);
-    stableOpencodeSessions.set(key, existing);
-    return existing.sessionId;
-  }
-  const sessionId = generateSessionId();
-  if (stableOpencodeSessions.size >= MAX_STABLE_SESSIONS) {
-    stableOpencodeSessions.delete(stableOpencodeSessions.keys().next().value);
-  }
-  stableOpencodeSessions.set(key, { sessionId, lastUsed: Date.now() });
-  return sessionId;
+  return stableOpencodeSession(opencodeIdentityKey(credentials, "opencode"));
 }
 
 function lastUserText(body) {
@@ -215,38 +182,6 @@ function normalizeRequestId(value) {
   return OPENCODE_REQUEST_RE.test(normalized) ? normalized : null;
 }
 
-function bodyHasSessionHints(body) {
-  try {
-    if (!body || typeof body !== "object") return false;
-    if (typeof body.session_id === "string" && body.session_id.trim()) return true;
-    if (typeof body.conversation_id === "string" && body.conversation_id.trim()) return true;
-    if (typeof body.prompt_cache_key === "string" && body.prompt_cache_key.trim()) return true;
-    if (body.metadata && typeof body.metadata.user_id === "string" && body.metadata.user_id.trim()) return true;
-    if (body.request && body.request.sessionId != null && String(body.request.sessionId) !== "") return true;
-    const arr = Array.isArray(body.messages)
-      ? body.messages
-      : Array.isArray(body.input)
-        ? body.input
-        : null;
-    if (arr) {
-      let assistantText = "";
-      for (const msg of arr) {
-        if (msg?.role === "assistant") {
-          const content = msg.content;
-          if (typeof content === "string") assistantText += content;
-          else if (Array.isArray(content)) {
-            for (const part of content) assistantText += part?.text || part?.output || "";
-          }
-          if (assistantText.length >= 50) return true;
-        }
-      }
-    }
-    return false;
-  } catch {
-    return false;
-  }
-}
-
 // Strip the thinking suffix "model(level)" so registry lookups hit the base id.
 function baseModelId(model) {
   return String(model || "").replace(/\([^()]+\)\s*$/, "").trim();
@@ -266,33 +201,18 @@ function resolveOpencodeSession(body, credentials, providerSessionId, clientTool
   const native = nativeSession(headers);
   if (native) return native;
 
-  let incoming = null;
-  for (const [key, value] of Object.entries(headers)) {
-    if (key.toLowerCase() === SESSION_HEADER) {
-      incoming = normalizeSession(value);
-      break;
-    }
-  }
-
-  const hinted = incoming || normalizeSession(providerSessionId);
-  if (hinted) return translateSessionId(hinted, clientTool);
-
-  if (credentials?.connectionId || bodyHasSessionHints(body)) {
-    let viaManager = null;
-    try {
-      viaManager = resolveSessionId({
-        headers,
-        body,
-        connectionId: credentials?.connectionId,
-        scope: "opencode",
-      });
-    } catch {
-      viaManager = null;
-    }
-    if (viaManager) return translateSessionId(viaManager, clientTool);
-  }
-
-  return stableSessionId(credentials);
+  // NOTE: never hash arbitrary ids into x-opencode-session. Upstream's
+  // free-tier gate only accepts ids with a valid client timestamp structure
+  // (genuine-client sessions or the canonical mint); sha-derived ids always
+  // 403 with FreeTierError. Junk seeds (sessionManager UUID+timestamp
+  // placeholders) are ignored by opencodeConversationKey so anonymous
+  // traffic shares one stable session instead of minting per request.
+  return stableOpencodeSession(opencodeConversationKey({
+    scope: "opencode",
+    credentials,
+    providerSessionId,
+    clientTool,
+  }));
 }
 
 function resolveOpencodeRequestId(body, credentials, sessionId) {
@@ -370,6 +290,33 @@ function sanitizeResponsesItems(body) {
   });
 }
 
+// The free chat-completions lane strictly validates reasoning_effort to
+// none/low/medium/high (anything else 400s, e.g. xhigh). The model registry
+// may list wider levels (paid lanes accept them), so clamp here at the
+// free-lane boundary instead of touching shared levels.
+const FREE_TIER_EFFORTS = new Set(["none", "low", "medium", "high"]);
+export function normalizeFreeTierReasoningEffort(body) {
+  if (!body || typeof body !== "object") return;
+  const clean = (effort) => {
+    if (typeof effort !== "string") return null;
+    const e = effort.toLowerCase().trim();
+    if (FREE_TIER_EFFORTS.has(e)) return e;
+    if (e === "xhigh" || e === "max" || e === "ultra") return "high";
+    return null;
+  };
+  if ("reasoning_effort" in body) {
+    const cleaned = clean(body.reasoning_effort);
+    if (cleaned) body.reasoning_effort = cleaned;
+    else delete body.reasoning_effort;
+  }
+  const reasoning = body.reasoning;
+  if (reasoning && typeof reasoning === "object" && !Array.isArray(reasoning) && "effort" in reasoning) {
+    const cleaned = clean(reasoning.effort);
+    if (cleaned) reasoning.effort = cleaned;
+    else delete reasoning.effort;
+  }
+}
+
 function normalizeOpencodeReasoning(model, body) {
   const current = body.reasoning;
   const currentReasoning = current && typeof current === "object" && !Array.isArray(current)
@@ -443,6 +390,7 @@ export class OpenCodeExecutor extends BaseExecutor {
       // non-empty tool arrays; skipping cloaking here triggers 403 FreeTierError.
       applyFingerprintTools(body, true);
     } else if (body && typeof body === "object") {
+      normalizeFreeTierReasoningEffort(body);
       applyFingerprintTools(body, false);
     }
     return injectReasoningContent({ provider: this.provider, model, body });
@@ -454,9 +402,9 @@ export class OpenCodeExecutor extends BaseExecutor {
 
   buildUrl(model) {
     const base = this.config.baseUrl;
-    if (isResponsesModel(model)) return `${base}/zen/v1/responses`;
-    if (isMessagesModel(model)) return `${base}/zen/v1/messages`;
-    return `${base}/zen/v1/chat/completions`;
+    if (isResponsesModel(model)) return `${base}/inference/v1/responses`;
+    if (isMessagesModel(model)) return `${base}/inference/v1/messages`;
+    return `${base}/inference/v1/chat/completions`;
   }
 
   buildHeaders(credentials, stream = true, url = "") {
@@ -475,8 +423,9 @@ export class OpenCodeExecutor extends BaseExecutor {
       "Content-Type": "application/json",
       "Authorization": "Bearer public",
       "User-Agent": isOpencodeDownstream ? downstreamUa : OPENCODE_UA,
-      "x-opencode-client": lower["x-opencode-client"] || "desktop",
+      "x-opencode-client": lower["x-opencode-client"] || "cli",
       "x-opencode-session": session,
+      "x-opencode-session-id": session,
       "x-opencode-request": requestId,
       "x-opencode-project": lower["x-opencode-project"] || "global",
       "Accept": stream ? "text/event-stream" : "*/*",

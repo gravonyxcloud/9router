@@ -19,18 +19,19 @@ export default {
   },
   category: "apikey",
   transport: {
-    baseUrl: "https://opencode.ai/zen/v1/chat/completions",
+    baseUrl: "https://opencode.ai/inference/v1/chat/completions",
     headers: {},
     usage: {
       url: "https://opencode.ai/zen/v1/usage",
     },
   },
   // Multi-endpoint: pick the transport matching the client sourceFormat to skip
-  // translation. Mirrors opencode-go, pointed at /zen/v1 (see https://opencode.ai/docs/zen/).
+  // translation. Mirrors opencode-go, pointed at /inference/v1 (upstream
+  // migrated inference off /zen/v1; models/usage/systemone stay on /zen/v1).
   transports: [
-    { format: "openai", baseUrl: "https://opencode.ai/zen/v1/chat/completions", auth: { combined: true, header: "Authorization", scheme: "bearer" } },
-    { format: "claude", baseUrl: "https://opencode.ai/zen/v1/messages", auth: { combined: true, header: "x-api-key", scheme: "raw", anthropicVersion: true } },
-    { format: "openai-responses", baseUrl: "https://opencode.ai/zen/v1/responses", auth: { combined: true, header: "Authorization", scheme: "bearer" } },
+    { format: "openai", baseUrl: "https://opencode.ai/inference/v1/chat/completions", auth: { combined: true, header: "Authorization", scheme: "bearer" } },
+    { format: "claude", baseUrl: "https://opencode.ai/inference/v1/messages", auth: { combined: true, header: "x-api-key", scheme: "raw", anthropicVersion: true } },
+    { format: "openai-responses", baseUrl: "https://opencode.ai/inference/v1/responses", auth: { combined: true, header: "Authorization", scheme: "bearer" } },
   ],
   // supportedFormats follow the endpoint table in https://opencode.ai/docs/zen/
   // (live /zen/v1/models, 2026-09-18: 71 ids).
@@ -122,8 +123,8 @@ export default {
   systemoneConfig: {
     baseUrl: "https://opencode.ai/zen/v1/systemone",
     headers: {
-      "x-opencode-client": "desktop",
-      "User-Agent": "opencode/1.18.31",
+      "x-opencode-client": "cli",
+      "User-Agent": "opencode/1.19.0 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14",
     },
   },
   modelsFetcher: { url: "https://opencode.ai/zen/v1/models", type: "opencode-free" },

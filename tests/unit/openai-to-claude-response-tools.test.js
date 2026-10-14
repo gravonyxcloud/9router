@@ -35,8 +35,7 @@ describe("openaiToClaudeResponse tool argument sanitization", () => {
     });
   });
 
-  it("keeps valid PDF pages", () => {
-    const state = createState();
+  it("keeps valid PDF pages", () => {    const state = createState();
 
     openaiToClaudeResponse({
       id: "chatcmpl-test-pdf",
@@ -57,5 +56,68 @@ describe("openaiToClaudeResponse tool argument sanitization", () => {
       file_path: "F:/repo/doc.pdf",
       pages: "1-3",
     });
+  });
+
+  it("maps upstream camelCase Edit args to snake_case", () => {
+    const state = createState();
+
+    openaiToClaudeResponse({
+      id: "chatcmpl-test-edit",
+      model: "test-model",
+      choices: [{ delta: { tool_calls: [{ index: 0, id: "toolu_edit", function: { name: "edit" } }] } }],
+    }, state);
+
+    const events = openaiToClaudeResponse({
+      id: "chatcmpl-test-edit",
+      model: "test-model",
+      choices: [{
+        delta: { tool_calls: [{ index: 0, function: { arguments: JSON.stringify({ filePath: "a.txt", oldString: "x", newString: "y", replaceAll: true }) } }] },
+        finish_reason: "tool_calls",
+      }],
+    }, state);
+
+    expect(JSON.parse(getInputJsonDelta(events))).toEqual({
+      file_path: "a.txt",
+      old_string: "x",
+      new_string: "y",
+      replace_all: true,
+    });
+  });
+
+  it("maps Write filePath and Bash cmd to agent spellings", () => {
+    const writeState = createState();
+    openaiToClaudeResponse({
+      id: "chatcmpl-test-write",
+      model: "test-model",
+      choices: [{ delta: { tool_calls: [{ index: 0, id: "toolu_write", function: { name: "write" } }] } }],
+    }, writeState);
+    const writeEvents = openaiToClaudeResponse({
+      id: "chatcmpl-test-write",
+      model: "test-model",
+      choices: [{
+        delta: { tool_calls: [{ index: 0, function: { arguments: JSON.stringify({ filePath: "b.txt", content: "hi" }) } }] },
+        finish_reason: "tool_calls",
+      }],
+    }, writeState);
+    expect(JSON.parse(getInputJsonDelta(writeEvents))).toEqual({
+      file_path: "b.txt",
+      content: "hi",
+    });
+
+    const bashState = createState();
+    openaiToClaudeResponse({
+      id: "chatcmpl-test-bash",
+      model: "test-model",
+      choices: [{ delta: { tool_calls: [{ index: 0, id: "toolu_bash", function: { name: "bash" } }] } }],
+    }, bashState);
+    const bashEvents = openaiToClaudeResponse({
+      id: "chatcmpl-test-bash",
+      model: "test-model",
+      choices: [{
+        delta: { tool_calls: [{ index: 0, function: { arguments: JSON.stringify({ cmd: "ls" }) } }] },
+        finish_reason: "tool_calls",
+      }],
+    }, bashState);
+    expect(JSON.parse(getInputJsonDelta(bashEvents))).toEqual({ command: "ls" });
   });
 });

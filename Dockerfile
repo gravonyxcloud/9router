@@ -19,15 +19,29 @@ ARG NPM_REGISTRY
 
 RUN apk add --no-cache python3 make g++ linux-headers
 
-COPY package.json ./
+COPY package.json package-lock.json ./
+# Install (not `npm ci`): stock installs crash arborist on Linux with
+# `Cannot read properties of null (reading 'edgesOut')` at
+# #loadPeerSet for node_modules/vitest (a registry-resolved peer walk that
+# does not exist in the local tree). --legacy-peer-deps skips that walk.
+# The retry covers a poisoned persistent cache mount (Easypanel reuses it).
 RUN --mount=type=cache,target=/root/.npm \
-    npm install \
+    npm install -g npm@10.9.2 && \
+    (npm install --legacy-peer-deps --no-audit --no-fund \
       --registry="${NPM_REGISTRY}" \
       --fetch-retries=5 \
       --fetch-retry-factor=2 \
       --fetch-retry-mintimeout=10000 \
       --fetch-retry-maxtimeout=120000 \
-      --fetch-timeout=300000
+      --fetch-timeout=300000 \
+    || (npm cache clean --force && npm install --legacy-peer-deps --no-audit --no-fund \
+      --registry="${NPM_REGISTRY}" \
+      --fetch-retries=5 \
+      --fetch-retry-factor=2 \
+      --fetch-retry-mintimeout=10000 \
+      --fetch-retry-maxtimeout=120000 \
+      --fetch-timeout=300000)) \
+    || (LOG=$(ls -t /root/.npm/_logs/*-debug-0.log 2>/dev/null | head -n 1); echo "=== NPM DEBUG LOG ${LOG} ==="; tail -n 120 "${LOG}"; exit 1)
 
 COPY . ./
 ENV NEXT_TELEMETRY_DISABLED=1
@@ -79,6 +93,9 @@ RUN apk add --no-cache su-exec && \
   chmod +x /entrypoint.sh
 
 EXPOSE 20128
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||'20128')+'/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["node", "custom-server.js"]

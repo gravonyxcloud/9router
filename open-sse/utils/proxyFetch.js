@@ -1,6 +1,8 @@
 import { Readable } from "stream";
 import { MEMORY_CONFIG } from "../config/runtimeConfig.js";
 import { dbg } from "./debugLog.js";
+import { isSocksProxyUrl, isSocksTlsCertError } from "../../src/lib/network/socksFetch.js";
+import { PROXY_FAILOVER_MAX_ATTEMPTS, noteProxyPoolResult } from "../../src/lib/network/proxyHealth.js";
 
 const originalFetch = globalThis.fetch;
 const proxyDispatchers = new Map();
@@ -252,6 +254,23 @@ async function getDispatcher(proxyUrl, insecure = false) {
 }
 
 async function fetchWithTlsFallback(url, options, proxyUrl) {
+  // SOCKS4/SOCKS5: undici dispatchers only speak HTTP CONNECT, so SOCKS
+  // traffic goes through socks-proxy-agent with a streaming Response.
+  // Mirrors the undici path below: retry without cert verification unless
+  // the operator pinned strict TLS.
+  if (proxyUrl && isSocksProxyUrl(proxyUrl)) {
+    const { socksFetch } = await import("../../src/lib/network/socksFetch.js");
+    try {
+      return await socksFetch(url, options, proxyUrl);
+    } catch (err) {
+      const isStrictSsl = process.env.STRICT_SSL === "true" || process.env.STRICT_SSL === "1";
+      if (!isStrictSsl && isSocksTlsCertError(err)) {
+        console.warn(`[ProxyFetch] SOCKS TLS cert verification failed (${err.cause?.code || err.code}), retrying with insecure TLS: ${url}`);
+        return await socksFetch(url, options, proxyUrl, { insecure: true });
+      }
+      throw err;
+    }
+  }
   try {
     const dispatcher = proxyUrl ? await getDispatcher(proxyUrl) : undefined;
     return await originalFetch(url, dispatcher ? { ...options, dispatcher } : options);
@@ -375,16 +394,50 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
   }
 
   if (proxyUrl) {
-    try {
-      return await fetchWithTlsFallback(url, options, proxyUrl);
-    } catch (proxyError) {
-      // If strictProxy is enabled, fail hard instead of falling back to direct
-      if (proxyOptions?.strictProxy === true) {
-        throw new Error(`[ProxyFetch] Proxy required but failed (strictProxy=true): ${proxyError.message}`);
-      }
-      console.warn(`[ProxyFetch] Proxy failed, falling back to direct: ${proxyError.message}`);
-      return fetchWithTlsFallback(url, options, null);
+    // Smart rotation: try the primary proxy, then failover candidates
+    // (sticky working pool first, failure cooldown respected). Each outcome
+    // is reported for stickiness, so traffic pins to a working proxy until
+    // it fails. Direct fallback only when every proxy failed (rare).
+    const scope = normalizeString(proxyOptions?.proxyScope);
+    const attempts = [{ proxyPoolId: proxyOptions?.proxyPoolId || null, url: proxyUrl, strict: proxyOptions?.strictProxy === true }];
+    const seenUrls = new Set([proxyUrl]);
+    const failovers = Array.isArray(proxyOptions?.proxyFailovers) ? proxyOptions.proxyFailovers : [];
+    for (const f of failovers) {
+      if (attempts.length >= PROXY_FAILOVER_MAX_ATTEMPTS) break;
+      const fUrl = normalizeString(f?.connectionProxyUrl);
+      if (!fUrl || seenUrls.has(fUrl)) continue;
+      seenUrls.add(fUrl);
+      attempts.push({ proxyPoolId: f.proxyPoolId || null, url: fUrl, strict: f.strictProxy === true });
     }
+    let strictAny = false;
+    let lastError = null;
+    for (let i = 0; i < attempts.length; i++) {
+      const attempt = attempts[i];
+      try {
+        const response = await fetchWithTlsFallback(url, options, attempt.url);
+        noteProxyPoolResult(scope, attempt.proxyPoolId, true);
+        if (i > 0) dbg("PROXY", `failover ${i}/${attempts.length - 1} via pool ${attempt.proxyPoolId || "unknown"} succeeded`);
+        return response;
+      } catch (proxyError) {
+        strictAny = strictAny || attempt.strict;
+        lastError = proxyError;
+        noteProxyPoolResult(scope, attempt.proxyPoolId, false);
+        if (i < attempts.length - 1) {
+          dbg("PROXY", `proxy ${i + 1}/${attempts.length} failed, trying next proxy: ${proxyError?.message || proxyError}`);
+        }
+      }
+    }
+    const finalMessage = lastError?.message || String(lastError || "all proxies failed");
+    // If strictProxy is enabled, fail hard instead of falling back to direct
+    if (strictAny || proxyOptions?.strictProxy === true) {
+      throw new Error(`[ProxyFetch] Proxy required but failed (strictProxy=true): ${finalMessage}`);
+    }
+    if (attempts.length === 1) {
+      console.warn(`[ProxyFetch] Proxy failed, falling back to direct: ${finalMessage}`);
+    } else {
+      console.warn(`[ProxyFetch] All ${attempts.length} proxies failed, falling back to direct: ${finalMessage}`);
+    }
+    return fetchWithTlsFallback(url, options, null);
   }
 
   // Strict mode means "never leave over the direct IP". Reaching here with a

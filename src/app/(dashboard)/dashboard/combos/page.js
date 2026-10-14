@@ -382,7 +382,7 @@ export default function CombosPage() {
           <Button icon="add" onClick={() => setShowCreateModal(true)} className="w-full sm:w-auto whitespace-nowrap">
             Create Combo
           </Button>
-          <div className="hidden">
+          <div className="flex flex-col gap-2">
             <Button
               variant="secondary"
               size="sm"

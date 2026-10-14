@@ -69,25 +69,39 @@ function writeJsonFile(sessionPath, filename, data) {
   }
 }
 
-// Mask sensitive data in headers (DISABLED - keep full token for testing)
+// Mask sensitive header values so request-log sessions never persist full
+// secrets (client API keys, upstream provider keys, cookies). Debug builds can
+// still correlate requests by the visible prefix/suffix.
+const SENSITIVE_HEADER_KEYS = [
+  "authorization",
+  "proxy-authorization",
+  "x-api-key",
+  "x-goog-api-key",
+  "apikey",
+  "api-key",
+  "cookie",
+  "set-cookie",
+  "token",
+  "secret",
+  "password",
+];
+
 function maskSensitiveHeaders(headers) {
-  if (!headers) return {};
-  return { ...headers };
-  
-  // Old masking code (disabled):
-  // const masked = { ...headers };
-  // const sensitiveKeys = ["authorization", "x-api-key", "cookie", "token"];
-  // 
-  // for (const key of Object.keys(masked)) {
-  //   const lowerKey = key.toLowerCase();
-  //   if (sensitiveKeys.some(sk => lowerKey.includes(sk))) {
-  //     const value = masked[key];
-  //     if (value && value.length > 20) {
-  //       masked[key] = value.slice(0, 10) + "..." + value.slice(-5);
-  //     }
-  //   }
-  // }
-  // return masked;
+  if (!headers || typeof headers !== "object" || Array.isArray(headers)) return {};
+  const masked = { ...headers };
+  for (const key of Object.keys(masked)) {
+    const lowerKey = String(key).toLowerCase();
+    if (!SENSITIVE_HEADER_KEYS.some((sk) => lowerKey.includes(sk))) continue;
+    const value = masked[key];
+    if (typeof value !== "string" || !value) {
+      masked[key] = "***";
+      continue;
+    }
+    masked[key] = value.length > 20
+      ? `${value.slice(0, 10)}...${value.slice(-5)}`
+      : "***";
+  }
+  return masked;
 }
 
 // No-op logger when logging is disabled
@@ -166,11 +180,14 @@ export async function createRequestLogger(sourceFormat, targetFormat, model) {
     // 5. Log provider response (for non-streaming or error)
     logProviderResponse(status, statusText, headers, body) {
       const filename = "5_res_provider.json";
+      const rawHeaders = headers
+        ? (typeof headers.entries === "function" ? Object.fromEntries(headers.entries()) : headers)
+        : {};
       writeJsonFile(sessionPath, filename, {
         timestamp: new Date().toISOString(),
         status,
         statusText,
-        headers: headers ? (typeof headers.entries === "function" ? Object.fromEntries(headers.entries()) : headers) : {},
+        headers: maskSensitiveHeaders(rawHeaders),
         body
       });
     },

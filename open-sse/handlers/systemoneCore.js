@@ -52,12 +52,16 @@ export async function handleSystemoneCore({
 
   // noAuth free lanes carry accessToken "public" from the credential stub.
   const token = credentials?.apiKey || credentials?.accessToken;
+  // One canonical session per request, sent under both header names like the
+  // chat executors do (x-opencode-session-id alongside x-opencode-session).
+  const opencodeSession = generateSessionId();
   const headers = {
     "Content-Type": "application/json",
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...(cfg.headers || {}),
     // Zen lanes expect the official client session header on every request.
-    "x-opencode-session": generateSessionId(),
+    "x-opencode-session": opencodeSession,
+    "x-opencode-session-id": opencodeSession,
   };
   // Cloudflare validates the body model as a short selector (e.g. "clef-flash"), not the full id.
   const requestBody = { ...body, model: getModelUpstreamId(provider, model) || model };

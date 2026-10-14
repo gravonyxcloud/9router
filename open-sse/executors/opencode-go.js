@@ -144,14 +144,21 @@ export class OpenCodeGoExecutor extends DefaultExecutor {
 
   buildHeaders(credentials, stream = true, url, model) {
     const headers = super.buildHeaders(credentials || {}, stream, url, model);
+    const raw = credentials?.rawHeaders || {};
+    const lower = {};
+    for (const [k, v] of Object.entries(raw)) lower[k.toLowerCase()] = v;
+    // Real CLI sends the client identifier on opencode-family lanes.
+    headers["x-opencode-client"] = lower["x-opencode-client"] || "cli";
     const prepared = credentials?.[SESSION_FIELD];
     if (prepared) {
       headers[SESSION_HEADER] = prepared;
+      headers["x-opencode-session-id"] = prepared;
       return headers;
     }
 
     const fallback = this.prepareRequestCredentials({ credentials });
     headers[SESSION_HEADER] = fallback[SESSION_FIELD];
+    headers["x-opencode-session-id"] = fallback[SESSION_FIELD];
     return headers;
   }
 

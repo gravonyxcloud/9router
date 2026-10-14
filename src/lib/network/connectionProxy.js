@@ -1,4 +1,9 @@
-import { getProxyPoolById } from "@/models";
+import { getProxyPoolById, getProxyPools } from "@/models";
+import {
+  PROXY_FAILOVER_MAX_ATTEMPTS,
+  getStickyProxyPoolId,
+  orderProxyCandidates,
+} from "./proxyHealth.js";
 
 // Safely normalize any value into a trimmed string.
 function normalizeString(value) {
@@ -31,6 +36,92 @@ export function pickProxyPoolId(poolIds, strategy, providerId) {
   }
 
   return poolIds[0]; // "none" or unknown
+}
+
+const RELAY_POOL_TYPES = new Set(["vercel", "cloudflare", "deno", "netlify"]);
+
+function isFailoverCandidate(pool) {
+  return (
+    pool &&
+    pool.isActive === true &&
+    normalizeString(pool.proxyUrl) &&
+    !RELAY_POOL_TYPES.has(pool.type)
+  );
+}
+
+/**
+ * Build in-request failover options for smart proxy rotation.
+ *
+ * Only applies to pool-driven traffic (bound pool or rotation pick);
+ * legacy, direct and relay traffic resolve to null and keep current
+ * behavior. Returns null when there is nothing to add, otherwise:
+ *   { connectionProxyUrl, connectionNoProxy, proxyPoolId, strictProxy,
+ *     proxyScope, proxyFailovers }
+ * where proxyFailovers is an ordered list of { proxyPoolId,
+ * connectionProxyUrl, strictProxy } to try after the primary proxy fails —
+ * so a dead proxy rotates to another proxy instead of leaking to direct.
+ *
+ * Order: sticky working pool for the scope first ("use the working proxy
+ * until it fails"), then the already-selected primary, then the remaining
+ * active pools, skipping pools inside the failure cooldown window (unless
+ * that would leave no candidates at all).
+ *
+ * Scope isolates stickiness: a connection pinned to pool P uses
+ * `pool:<P>`; shared rotation traffic uses `provider:<provider>`.
+ */
+export async function resolveProxyFailoverOptions(credentials = {}, provider = "") {
+  try {
+    const psd = credentials?.providerSpecificData || {};
+    // Only pool-driven traffic: rotation picks land in connectionProxyPoolId,
+    // pinned connections in proxyPoolId. Legacy/direct/relay keep as-is.
+    if (psd.connectionProxyEnabled !== true || !normalizeString(psd.connectionProxyUrl)) {
+      return null;
+    }
+    if (normalizeString(psd.vercelRelayUrl)) return null;
+    const rawBoundId = normalizeString(psd.proxyPoolId || psd.connectionProxyPoolId);
+    if (!rawBoundId || rawBoundId === "__none__") return null;
+    const pickedId = rawBoundId;
+    const scope = psd.proxyPoolId && psd.proxyPoolId !== "__none__"
+      ? `pool:${psd.proxyPoolId}`
+      : `provider:${provider || "shared"}`;
+
+    let pools = [];
+    try {
+      pools = await getProxyPools({ isActive: true });
+    } catch {
+      return null;
+    }
+    const candidates = pools.filter(isFailoverCandidate);
+    if (candidates.length === 0) return null;
+
+    const byId = new Map(candidates.map((p) => [p.id, p]));
+    const primary = byId.get(pickedId) || null;
+
+    const ordered = orderProxyCandidates(candidates, {
+      primaryId: primary ? primary.id : null,
+      stickyId: getStickyProxyPoolId(scope),
+      limit: PROXY_FAILOVER_MAX_ATTEMPTS,
+    });
+    if (ordered.length === 0) return null;
+    const [first, ...others] = ordered;
+    return {
+      connectionProxyUrl: normalizeString(first.proxyUrl),
+      connectionNoProxy: normalizeString(first.noProxy),
+      proxyPoolId: first.id,
+      strictProxy: first.strictProxy === true,
+      proxyScope: scope,
+      proxyFailovers: others
+        .map((p) => ({
+          proxyPoolId: p.id,
+          connectionProxyUrl: normalizeString(p.proxyUrl),
+          strictProxy: p.strictProxy === true,
+        }))
+        .filter((f) => f.connectionProxyUrl),
+    };
+  } catch (error) {
+    console.error("[resolveProxyFailoverOptions] Failed:", error);
+    return null;
+  }
 }
 
 /**
@@ -126,6 +217,26 @@ export async function resolveConnectionProxyConfig(
         /**
          * Standard proxy pool
          */
+        let proxyFailovers = [];
+        let proxyScope = `pool:${proxyPoolId}`;
+        try {
+          const allPools = await getProxyPools({ isActive: true });
+          const failoverCandidates = allPools.filter(isFailoverCandidate);
+          const ordered = orderProxyCandidates(failoverCandidates, {
+            primaryId: proxyPoolId,
+            stickyId: getStickyProxyPoolId(proxyScope),
+            limit: PROXY_FAILOVER_MAX_ATTEMPTS,
+          }).filter((p) => p.id !== proxyPoolId);
+          proxyFailovers = ordered
+            .map((p) => ({
+              proxyPoolId: p.id,
+              connectionProxyUrl: normalizeString(p.proxyUrl),
+              strictProxy: p.strictProxy === true,
+            }))
+            .filter((f) => f.connectionProxyUrl);
+        } catch {
+          // Fail-open: single-proxy behavior without failovers.
+        }
         return {
           source: "pool",
 
@@ -137,6 +248,9 @@ export async function resolveConnectionProxyConfig(
           connectionNoProxy: noProxy,
 
           strictProxy: proxyPool.strictProxy === true,
+
+          proxyScope,
+          proxyFailovers,
         };
       }
     }

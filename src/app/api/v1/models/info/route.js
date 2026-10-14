@@ -1,6 +1,7 @@
 import { PROVIDER_MODELS } from "open-sse/config/providerModels.js";
 import { AI_PROVIDERS, ALIAS_TO_ID } from "@/shared/constants/providers";
 import { getModelKind } from "@/shared/constants/models";
+import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
 
 const KIND_ENDPOINT = {
   llm: "/v1/chat/completions",
@@ -27,7 +28,15 @@ function buildInfo({ alias, providerId, model, kind, providerInfo }) {
   if (model.capabilities) out.capabilities = model.capabilities;
   if (model.options) out.options = model.options;
   if (model.dimensions) out.dimensions = model.dimensions;
-  if (model.contextWindow) out.contextWindow = model.contextWindow;
+  // Publish per-model limits from the same capability registry used by routing.
+  // Respect explicit provider model metadata first, then use provider-aware capabilities.
+  const caps = getCapabilitiesForModel(providerId, model.id);
+  const contextWindow = Number(model.contextWindow || caps.contextWindow);
+  const maxOutput = Number(model.maxOutput || caps.maxOutput);
+  if (Number.isFinite(contextWindow) && contextWindow > 0) out.contextWindow = contextWindow;
+  if (Number.isFinite(maxOutput) && maxOutput > 0) out.maxOutput = maxOutput;
+  if (caps.reasoning !== undefined) out.reasoning = !!caps.reasoning;
+  if (caps.tools !== undefined) out.tools = !!caps.tools;
   if (kind === "tts" && TTS_VOICES_API.has(providerId)) {
     out.voicesUrl = `/v1/audio/voices?provider=${providerId}`;
   }
@@ -84,6 +93,14 @@ export async function OPTIONS() {
 
 // GET /v1/models/info?id={alias}/{modelId} — metadata for a single model
 export async function GET(request) {
+  // Do not expose upstream model metadata to client API keys.
+  const { getKeyAccessContext } = await import("@/sse/services/keyAccess.js");
+  const keyContext = await getKeyAccessContext(request);
+  if (keyContext) {
+    return Response.json({ error: { message: "Model details are available only through configured combos.", type: "not_found" } }, {
+      status: 404, headers: { "Access-Control-Allow-Origin": "*" },
+    });
+  }
   const { searchParams } = new URL(request.url);
   const id = searchParams.get("id");
   const kind = searchParams.get("kind");

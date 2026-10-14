@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getSettings, updateSettings } from "@/lib/localDb";
 import { PROVIDERS } from "open-sse/config/providers.js";
 import { resolveProviderAlias } from "open-sse/services/model.js";
+import { OPENCODE_UA } from "open-sse/executors/opencode.js";
 
 export const dynamic = "force-dynamic";
 
@@ -74,10 +75,25 @@ export async function GET(request, { params }) {
     const override = (await readOverrides())[canonical] || {};
     // Built-in headers come straight from the registry transport — single source of
     // truth, so the UI pre-fills exactly what this provider sends upstream.
-    return NextResponse.json({
+    const builtinHeaders = PROVIDERS[canonical]?.headers || {};
+    const response = {
       headers: override.headers || {},
-      builtinHeaders: PROVIDERS[canonical]?.headers || {},
-    });
+      builtinHeaders,
+    };
+    // Free-tier fingerprint actually sent upstream (opencode family): static
+    // defaults plus the user's override, so the dashboard shows the effective
+    // values instead of hiding them in executor code.
+    if (canonical === "opencode" || canonical === "opencode-zen" || canonical === "opencode-go") {
+      const effective = (name, fallback) => override.headers?.[name] || builtinHeaders[name] || fallback;
+      response.fingerprint = [
+        { name: "User-Agent", value: OPENCODE_UA, source: "automatic" },
+        { name: "x-opencode-client", value: effective("x-opencode-client", "cli"), source: override.headers?.["x-opencode-client"] ? "custom" : (builtinHeaders["x-opencode-client"] ? "built-in" : "automatic") },
+        { name: "x-opencode-session", value: "stable per conversation (ses_<12hex><14base62>)", source: "automatic" },
+        { name: "x-opencode-session-id", value: "mirrors x-opencode-session", source: "automatic" },
+        { name: "x-opencode-request", value: "fresh id per message (msg_<12hex><14base62>)", source: "automatic" },
+      ];
+    }
+    return NextResponse.json(response);
   } catch (error) {
     console.log("Error getting provider overrides:", error);
     return NextResponse.json({ error: "Failed to get overrides" }, { status: 500 });

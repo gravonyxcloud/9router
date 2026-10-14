@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
-import { Badge, Button, Card, CardSkeleton, Input, Modal, Toggle, ConfirmModal } from "@/shared/components";
+import { Badge, Button, Card, CardSkeleton, Input, Modal, Select, Toggle, ConfirmModal } from "@/shared/components";
 import { useNotificationStore } from "@/store/notificationStore";
 
 function getStatusVariant(status) {
@@ -24,6 +24,23 @@ function normalizeFormData(data = {}) {
     noProxy: data.noProxy || "",
     isActive: data.isActive !== false,
     strictProxy: data.strictProxy === true,
+  };
+}
+
+const SOURCE_PROTOCOL_OPTIONS = [
+  { value: "auto", label: "Auto (per-line scheme, plain lines as HTTP)" },
+  { value: "http", label: "HTTP" },
+  { value: "socks4", label: "SOCKS4" },
+  { value: "socks5", label: "SOCKS5" },
+];
+
+function normalizeSourceFormData(data = {}) {
+  return {
+    name: data.name || "",
+    url: data.url || "",
+    protocol: ["auto", "http", "socks4", "socks5"].includes(data.protocol) ? data.protocol : "auto",
+    isActive: data.isActive !== false,
+    autoUpdate: data.autoUpdate !== false,
   };
 }
 
@@ -53,6 +70,13 @@ export default function ProxyPoolsPage() {
   const [healthProgress, setHealthProgress] = useState({ current: 0, total: 0 });
   const [bulkBusy, setBulkBusy] = useState(false);
   const [confirmState, setConfirmState] = useState(null);
+  const [autoHealth, setAutoHealth] = useState(null);
+  const [listSources, setListSources] = useState([]);
+  const [showSourceModal, setShowSourceModal] = useState(false);
+  const [editingSource, setEditingSource] = useState(null);
+  const [sourceFormData, setSourceFormData] = useState(normalizeSourceFormData());
+  const [savingSource, setSavingSource] = useState(false);
+  const [syncingSourceIds, setSyncingSourceIds] = useState(() => new Set());
   const relayMenuRef = useRef(null);
   const notify = useNotificationStore();
 
@@ -85,6 +109,15 @@ export default function ProxyPoolsPage() {
   useEffect(() => {
     fetchProxyPools();
   }, [fetchProxyPools]);
+
+  useEffect(() => {
+    fetch("/api/proxy-pools/auto-health", { cache: "no-store" })
+      .then((res) => res.json())
+      .then((data) => {
+        if (data && !data.error) setAutoHealth(data);
+      })
+      .catch(() => {});
+  }, []);
 
   const resetForm = () => {
     setEditingProxyPool(null);
@@ -595,6 +628,146 @@ export default function ProxyPoolsPage() {
     }
   };
 
+  const fetchListSources = useCallback(async () => {
+    try {
+      const res = await fetch("/api/proxy-list-sources", { cache: "no-store" });
+      const data = await res.json();
+      if (res.ok) {
+        setListSources(data.sources || []);
+      }
+    } catch (error) {
+      console.log("Error fetching proxy list sources:", error);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchListSources();
+  }, [fetchListSources]);
+
+  const resetSourceForm = () => {
+    setEditingSource(null);
+    setSourceFormData(normalizeSourceFormData());
+  };
+
+  const openCreateSourceModal = () => {
+    resetSourceForm();
+    setShowSourceModal(true);
+  };
+
+  const openEditSourceModal = (source) => {
+    setEditingSource(source);
+    setSourceFormData(normalizeSourceFormData(source));
+    setShowSourceModal(true);
+  };
+
+  const closeSourceModal = () => {
+    setShowSourceModal(false);
+    resetSourceForm();
+  };
+
+  const handleSaveSource = async () => {
+    if (savingSource) return;
+    const payload = {
+      name: sourceFormData.name.trim(),
+      url: sourceFormData.url.trim(),
+      protocol: sourceFormData.protocol,
+      isActive: sourceFormData.isActive === true,
+      autoUpdate: sourceFormData.autoUpdate === true,
+    };
+    if (!payload.name || !payload.url) {
+      notify.warning("Name and list URL are required.");
+      return;
+    }
+    setSavingSource(true);
+    try {
+      const res = await fetch(editingSource ? `/api/proxy-list-sources/${editingSource.id}` : "/api/proxy-list-sources", {
+        method: editingSource ? "PUT" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        notify.error(data.error || "Failed to save list source");
+        return;
+      }
+      notify.success(editingSource ? "List source updated" : "List source added");
+      closeSourceModal();
+      await fetchListSources();
+    } catch (error) {
+      console.log("Error saving list source:", error);
+      notify.error("Failed to save list source");
+    } finally {
+      setSavingSource(false);
+    }
+  };
+
+  const handleDeleteSource = (source) => {
+    setConfirmState({
+      title: "Remove List Source",
+      message: `Remove "${source.name}"? Proxies already imported (including manual ones) are kept.`,
+      confirmText: "Remove",
+      onConfirm: async () => {
+        setConfirmState(null);
+        try {
+          const res = await fetch(`/api/proxy-list-sources/${source.id}`, { method: "DELETE" });
+          if (res.ok) {
+            notify.success("List source removed");
+            await fetchListSources();
+          } else {
+            notify.error("Failed to remove list source");
+          }
+        } catch (error) {
+          console.log("Error deleting list source:", error);
+          notify.error("Failed to remove list source");
+        }
+      },
+    });
+  };
+
+  const handleToggleSource = async (source, field) => {
+    try {
+      const res = await fetch(`/api/proxy-list-sources/${source.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [field]: !(source[field] === true) }),
+      });
+      if (res.ok) {
+        await fetchListSources();
+      } else {
+        notify.error("Failed to update list source");
+      }
+    } catch (error) {
+      console.log("Error updating list source:", error);
+      notify.error("Failed to update list source");
+    }
+  };
+
+  const handleSyncSource = async (source) => {
+    if (syncingSourceIds.has(source.id)) return;
+    setSyncingSourceIds((prev) => new Set(prev).add(source.id));
+    try {
+      const res = await fetch(`/api/proxy-list-sources/${source.id}/sync`, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.result?.ok) {
+        notify.error(data.result?.error || data.error || "List sync failed");
+      } else {
+        const r = data.result;
+        notify.success(`Sync done: found ${r.found}, new ${r.imported} (${r.newActive ?? r.imported} active), failed ${r.failed}, skipped ${r.skipped}`);
+      }
+      await fetchListSources();
+      await fetchProxyPools();
+    } catch (error) {
+      console.log("Error syncing list source:", error);
+      notify.error("List sync failed");
+    } finally {
+      setSyncingSourceIds((prev) => {
+        const next = new Set(prev);
+        next.delete(source.id);
+        return next;
+      });
+    }
+  };
+
   const activeCount = useMemo(
     () => proxyPools.filter((pool) => pool.isActive === true).length,
     [proxyPools]
@@ -679,6 +852,9 @@ export default function ProxyPoolsPage() {
           <Button size="sm" variant="secondary" icon="upload" onClick={openBatchImportModal}>
             Batch Import
           </Button>
+          <Button size="sm" variant="secondary" icon="playlist_add" onClick={openCreateSourceModal}>
+            Add List{listSources.length > 0 ? ` (${listSources.length})` : ""}
+          </Button>
           <Button size="sm" icon="add" onClick={openCreateModal}>Add Proxy Pool</Button>
         </div>
       </div>
@@ -698,6 +874,11 @@ export default function ProxyPoolsPage() {
           )}
           <Badge variant="default">Total: {proxyPools.length}</Badge>
           <Badge variant="success">Active: {activeCount}</Badge>
+          {autoHealth?.enabled && (
+            <Badge variant="default" title={autoHealth?.lastRun?.at ? `Last run ${formatDateTime(autoHealth.lastRun.at)}: tested ${autoHealth.lastRun.tested || 0}, alive ${autoHealth.lastRun.alive || 0}, dead ${autoHealth.lastRun.dead || 0}` : "Auto-test running every minute"}>
+              Auto-test 1min{autoHealth?.lastRun?.at ? `: alive ${autoHealth.lastRun.alive || 0}/${autoHealth.lastRun.tested || 0}` : ""}
+            </Badge>
+          )}
         </div>
 
         {(selectedIds.length > 0 || healthChecking) && (
@@ -760,6 +941,11 @@ export default function ProxyPoolsPage() {
                     <Badge variant={getStatusVariant(pool.testStatus)} size="sm" dot>
                       {pool.testStatus || "unknown"}
                     </Badge>
+                    {pool.opencodeOk === true && (
+                      <Badge variant="success" size="sm" title="Reached OpenCode through this proxy">
+                        opencode ok
+                      </Badge>
+                    )}
                     <Badge variant={pool.isActive ? "success" : "default"} size="sm">
                       {pool.isActive ? "active" : "inactive"}
                     </Badge>
@@ -830,6 +1016,162 @@ export default function ProxyPoolsPage() {
           </div>
         )}
       </Card>
+
+      <Card>
+        <div className="mb-4 flex flex-wrap items-center gap-2">
+          <h2 className="text-base font-semibold">TXT List Sources</h2>
+          <Badge variant="default">Auto-sync every 5 min</Badge>
+          <div className="ml-auto">
+            <Button size="sm" icon="add" onClick={openCreateSourceModal}>Add List</Button>
+          </div>
+        </div>
+        <p className="mb-3 text-xs text-text-muted">
+          Point to a public plain-text proxy list (e.g. ProxyScrape). New proxies are imported without
+          duplicating existing entries and without touching manually added ones.
+        </p>
+
+        {listSources.length === 0 ? (
+          <div className="text-center py-6">
+            <p className="text-text-main font-medium mb-1">No list sources yet</p>
+            <p className="text-sm text-text-muted mb-4">
+              Add a list URL to auto-import proxies every 5 minutes.
+            </p>
+            <Button size="sm" icon="add" onClick={openCreateSourceModal}>Add List</Button>
+          </div>
+        ) : (
+          <div className="flex flex-col divide-y divide-black/[0.04] dark:divide-white/[0.05]">
+            {listSources.map((source) => {
+              const syncing = syncingSourceIds.has(source.id);
+              return (
+                <div key={source.id} className="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="min-w-0 max-w-full truncate text-sm font-medium sm:max-w-[18rem]">{source.name}</p>
+                      <Badge variant={source.lastStatus === "ok" ? "success" : source.lastStatus === "error" ? "error" : "default"} size="sm" dot>
+                        {source.lastStatus || "never synced"}
+                      </Badge>
+                      <Badge variant="default" size="sm">{source.protocol || "auto"}</Badge>
+                      <Badge variant={source.autoUpdate ? "success" : "default"} size="sm">
+                        {source.autoUpdate ? "auto" : "manual"}
+                      </Badge>
+                      <Badge variant={source.isActive ? "success" : "default"} size="sm">
+                        {source.isActive ? "active" : "inactive"}
+                      </Badge>
+                    </div>
+                    <p className="text-xs text-text-muted truncate mt-1">{source.url}</p>
+                    <p className="text-[11px] text-text-muted mt-1">
+                      Updated: {formatDateTime(source.lastFetchedAt)}
+                      {` · found ${source.totalFound || 0} · new ${source.totalNew || 0} · failed ${source.totalFailed || 0}`}
+                      {source.lastError ? ` · ${source.lastError}` : ""}
+                    </p>
+                  </div>
+
+                  <div className="flex items-center justify-end gap-1">
+                    <div className="flex flex-col items-center gap-0.5 px-1">
+                      <Toggle
+                        size="sm"
+                        checked={source.autoUpdate === true}
+                        onChange={() => handleToggleSource(source, "autoUpdate")}
+                        title={source.autoUpdate ? "Disable auto-update" : "Enable auto-update"}
+                      />
+                      <span className="text-[10px] leading-none text-text-muted">Auto</span>
+                    </div>
+                    <div className="flex flex-col items-center gap-0.5 px-1">
+                      <Toggle
+                        size="sm"
+                        checked={source.isActive === true}
+                        onChange={() => handleToggleSource(source, "isActive")}
+                        title={source.isActive ? "Disable" : "Enable"}
+                      />
+                      <span className="text-[10px] leading-none text-text-muted">Ativo</span>
+                    </div>
+                    <button
+                      onClick={() => handleSyncSource(source)}
+                      className="p-2 rounded hover:bg-black/5 dark:hover:bg-white/5 text-text-muted hover:text-primary"
+                      title="Sync now"
+                      disabled={syncing}
+                    >
+                      <span
+                        className="material-symbols-outlined text-[18px]"
+                        style={syncing ? { animation: "spin 1s linear infinite" } : undefined}
+                      >
+                        {syncing ? "progress_activity" : "sync"}
+                      </span>
+                    </button>
+                    <button
+                      onClick={() => openEditSourceModal(source)}
+                      className="p-2 rounded hover:bg-black/5 dark:hover:bg-white/5 text-text-muted hover:text-primary"
+                      title="Edit"
+                    >
+                      <span className="material-symbols-outlined text-[18px]">edit</span>
+                    </button>
+                    <button
+                      onClick={() => handleDeleteSource(source)}
+                      className="p-2 rounded hover:bg-red-500/10 text-red-500"
+                      title="Remove"
+                    >
+                      <span className="material-symbols-outlined text-[18px]">delete</span>
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Card>
+
+      <Modal
+        isOpen={showSourceModal}
+        title={editingSource ? "Edit List Source" : "Add TXT List Source"}
+        onClose={closeSourceModal}
+      >
+        <div className="flex flex-col gap-4">
+          <Input
+            label="Name"
+            required
+            placeholder="e.g. ProxyScrape SOCKS5"
+            value={sourceFormData.name}
+            onChange={(e) => setSourceFormData({ ...sourceFormData, name: e.target.value })}
+          />
+          <Input
+            label="List URL"
+            required
+            placeholder="https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&..."
+            value={sourceFormData.url}
+            onChange={(e) => setSourceFormData({ ...sourceFormData, url: e.target.value })}
+            hint="Public plain-text URL, one proxy per line. Redirects are re-validated against SSRF."
+          />
+          <Select
+            label="Protocol for lines without scheme"
+            options={SOURCE_PROTOCOL_OPTIONS}
+            value={sourceFormData.protocol}
+            onChange={(e) => setSourceFormData({ ...sourceFormData, protocol: e.target.value })}
+            hint="Lines with an explicit scheme (socks5://…) always keep their own protocol."
+          />
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-sm text-text-main">Auto-update every 5 minutes</span>
+            <Toggle
+              checked={sourceFormData.autoUpdate === true}
+              onChange={() => setSourceFormData({ ...sourceFormData, autoUpdate: !sourceFormData.autoUpdate })}
+            />
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-sm text-text-main">Active</span>
+            <Toggle
+              checked={sourceFormData.isActive === true}
+              onChange={() => setSourceFormData({ ...sourceFormData, isActive: !sourceFormData.isActive })}
+            />
+          </div>
+          <div className="flex flex-col gap-2">
+            <Button fullWidth onClick={handleSaveSource} disabled={savingSource}>
+              {savingSource ? "Saving..." : "Save"}
+            </Button>
+            <Button fullWidth variant="ghost" onClick={closeSourceModal} disabled={savingSource}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      </Modal>
 
       <Modal
         isOpen={showBatchImportModal}
@@ -1165,6 +1507,7 @@ export default function ProxyPoolsPage() {
         onConfirm={confirmState?.onConfirm}
         title={confirmState?.title || "Confirm"}
         message={confirmState?.message}
+        confirmText={confirmState?.confirmText || "Confirm"}
         variant="danger"
       />
     </div>

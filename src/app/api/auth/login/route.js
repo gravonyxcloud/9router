@@ -102,7 +102,7 @@ export async function POST(request) {
       );
     }
     return NextResponse.json(
-      { error: `Invalid password. ${remainingBeforeLock} attempt(s) left before lockout.`, remainingBeforeLock },
+      { error: `Invalid password. ${remainingBeforeLock} attempt(s) left before lockout.${storedHash ? "" : " (No stored password: the initial password is read from INITIAL_PASSWORD at startup — recreate the container after editing .env; restart alone is not enough.)"}`, remainingBeforeLock },
       { status: 401 }
     );
   } catch (error) {

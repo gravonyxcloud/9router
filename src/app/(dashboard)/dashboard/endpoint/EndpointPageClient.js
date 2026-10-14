@@ -24,6 +24,12 @@ export default function APIPageClient({ machineId }) {
   const [loading, setLoading] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
   const [newKeyName, setNewKeyName] = useState("");
+  const [newKeyEmail, setNewKeyEmail] = useState("");
+  const [newKeyPlan, setNewKeyPlan] = useState("30d");
+  const [newKeyType, setNewKeyType] = useState("license");
+  const [renewingKey, setRenewingKey] = useState(null);
+  const [renewPlan, setRenewPlan] = useState("7d");
+  const [renewBusy, setRenewBusy] = useState(false);
   const [createdKey, setCreatedKey] = useState(null);
   const [confirmState, setConfirmState] = useState(null);
 
@@ -616,13 +622,16 @@ export default function APIPageClient({ machineId }) {
   };
 
   const handleCreateKey = async () => {
-    if (!newKeyName.trim()) return;
+    if (newKeyType === "normal" ? !newKeyName.trim() : !newKeyEmail.trim()) return;
 
     try {
+      const payload = newKeyType === "normal"
+        ? { type: "normal", name: newKeyName.trim() }
+        : { type: "license", name: newKeyName.trim() || newKeyEmail.trim(), email: newKeyEmail.trim(), plan: newKeyPlan };
       const res = await fetch("/api/keys", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: newKeyName }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
 
@@ -630,11 +639,31 @@ export default function APIPageClient({ machineId }) {
         setCreatedKey(data.key);
         await fetchData();
         setNewKeyName("");
+        setNewKeyEmail("");
+        setNewKeyPlan("30d");
         setShowAddModal(false);
       }
     } catch (error) {
       console.log("Error creating key:", error);
     }
+  };
+
+  const handleRenewKey = async () => {
+    if (!renewingKey) return;
+    setRenewBusy(true);
+    try {
+      const res = await fetch("/api/keys/" + encodeURIComponent(renewingKey.id) + "/renew", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ plan: renewPlan }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Não foi possível renovar a licença.");
+      setKeys((prev) => prev.map((k) => k.id === renewingKey.id ? { ...k, ...data.license } : k));
+      setRenewingKey(null);
+      window.alert("Licença renovada com sucesso.");
+    } catch (error) {
+      window.alert(error.message || "Erro ao renovar licença.");
+    } finally { setRenewBusy(false); }
   };
 
   const handleDeleteKey = async (id) => {
@@ -975,6 +1004,40 @@ export default function APIPageClient({ machineId }) {
         )}
       </Card>
 
+      {/* License API documentation */}
+      <Card id="license-api-docs" className="mt-6">
+        <div className="flex items-center gap-2 mb-3">
+          <span className="material-symbols-outlined text-primary">menu_book</span>
+          <h2 className="text-lg font-semibold">Documentação da API de licenças</h2>
+        </div>
+        <p className="text-sm text-text-muted mb-4">
+          Use estes endpoints somente no seu backend por HTTPS. Nunca envie o segredo privado ao navegador nem ao cliente final.
+        </p>
+        <div className="space-y-4 text-sm">
+          <section className="rounded-lg border border-border p-3">
+            <p className="font-semibold mb-1">Ativar / criar licença</p>
+            <code className="block text-xs break-all mb-2">POST /api/license/activate</code>
+            <pre className="overflow-x-auto rounded bg-black/5 dark:bg-white/5 p-3 text-xs">{'curl -X POST "' + window.location.origin + '/api/license/activate" \\\n  -H "Content-Type: application/json" \\\n  -H "x-license-secret: $LICENSE_API_SECRET" \\\n  -d \'{"email":"cliente@exemplo.com","plan":"30d","orderId":"pedido-123"}\''}</pre>
+            <p className="text-text-muted mt-2">Planos aceitos: 3d, 7d, 15d ou 30d. A resposta traz a chave e a expiração. orderId é opcional e pode ser usado para evitar ativações duplicadas.</p>
+          </section>
+          <section className="rounded-lg border border-border p-3">
+            <p className="font-semibold mb-1">Renovar licença existente</p>
+            <code className="block text-xs break-all mb-2">POST /api/license/renew</code>
+            <pre className="overflow-x-auto rounded bg-black/5 dark:bg-white/5 p-3 text-xs">{'curl -X POST "' + window.location.origin + '/api/license/renew" \\\n  -H "Content-Type: application/json" \\\n  -H "x-license-secret: $LICENSE_API_SECRET" \\\n  -d \'{"email":"cliente@exemplo.com","key":"CHAVE_ATUAL","plan":"7d","orderId":"renovacao-456"}\''}</pre>
+            <p className="text-text-muted mt-2">Exige a chave atual e o mesmo e-mail cadastrado. Mantém a chave e soma o prazo ao vencimento atual; se já venceu, conta a partir de agora.</p>
+          </section>
+          <section className="rounded-lg border border-border p-3">
+            <p className="font-semibold mb-1">Cabeçalhos aceitos</p>
+            <p className="text-text-muted">O e-mail pode ser enviado no corpo como <code>email</code> ou no cabeçalho <code>x-customer-email</code>. Na renovação, a chave pode estar no corpo como <code>key</code> ou no cabeçalho <code>x-api-key</code>. <code>x-license-secret</code> é obrigatório em ambas.</p>
+          </section>
+          <section className="rounded-lg border border-border p-3">
+            <p className="font-semibold mb-1">Como o cliente usa a chave</p>
+            <pre className="overflow-x-auto rounded bg-black/5 dark:bg-white/5 p-3 text-xs">{'GET ' + window.location.origin + '/v1/models\nAuthorization: Bearer CHAVE_DO_CLIENTE'}</pre>
+            <p className="text-text-muted mt-2">A API do cliente lista somente os combos publicados. Os modelos e serviços internos ficam ocultos e não podem ser chamados diretamente pela chave do cliente.</p>
+          </section>
+        </div>
+      </Card>
+
       {/* API Keys */}
       <Card id="require-api-key">
         <div className="flex items-center justify-between mb-4">
@@ -1025,7 +1088,18 @@ export default function APIPageClient({ machineId }) {
                 className={`group flex items-start justify-between gap-3 py-3 border-b border-black/[0.03] dark:border-white/[0.03] last:border-b-0 ${key.isActive === false ? "opacity-60" : ""}`}
               >
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium">{key.name}</p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-sm font-semibold">{key.name}</p>
+                    {key.expiresAt ? <span title={"Política de uso justo: " + (key.hourlyTokenLimit || 80000000).toLocaleString("pt-BR") + " tokens por hora"} className="inline-flex items-center gap-1 rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[11px] text-sky-700 dark:text-sky-300"><span className="material-symbols-outlined text-[14px]">info</span> Uso justo ativo</span> : <span className="rounded-full bg-black/5 dark:bg-white/5 px-2 py-0.5 text-[11px] text-text-muted">Chave normal</span>}
+                    {key.expiresAt && Date.parse(key.expiresAt) <= Date.now() && <span className="rounded-full bg-red-500/10 px-2 py-0.5 text-[11px] text-red-600">Expirada</span>}
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-text-muted">
+                    <span>Criada: {key.createdAt ? new Date(key.createdAt).toLocaleDateString("pt-BR") : "—"}</span>
+                    {key.email && <span>Cliente: {key.email}</span>}
+                    {key.plan && <span>Plano: {key.plan}</span>}
+                    {key.expiresAt ? <span>Vence: {new Date(key.expiresAt).toLocaleString("pt-BR")}</span> : <span>Vencimento: nunca</span>}
+                    {key.expiresAt && <span>Limite: {((key.hourlyTokenLimit || 80000000)/1000000).toLocaleString("pt-BR")} mi tokens/h</span>}
+                  </div>
                   <div className="flex items-center gap-2 mt-1 min-w-0 flex-wrap">
                     <code className="text-xs text-text-muted font-mono break-all min-w-0">
                       {visibleKeys.has(key.id) ? key.key : maskKey(key.key)}
@@ -1089,6 +1163,7 @@ export default function APIPageClient({ machineId }) {
                     }}
                     title={key.isActive ? "Pause key" : "Resume key"}
                   />
+                  {key.expiresAt && key.email && <button onClick={() => { setRenewingKey(key); setRenewPlan("7d"); }} className="p-2 rounded text-primary hover:bg-primary/10" title="Renovar licença"><span className="material-symbols-outlined text-[18px]">autorenew</span></button>}
                   <button
                     onClick={() => handleDeleteKey(key.id)}
                     className="p-2 hover:bg-red-500/10 rounded text-red-500 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-all"
@@ -1102,6 +1177,15 @@ export default function APIPageClient({ machineId }) {
         )}
       </Card>
 
+      <Modal isOpen={!!renewingKey} title="Renovar licença" onClose={() => { if (!renewBusy) setRenewingKey(null); }}>
+        {renewingKey && <div className="flex flex-col gap-4">
+          <div className="rounded-lg border border-border p-3"><p className="font-semibold">{renewingKey.name}</p><p className="text-xs text-text-muted">{renewingKey.email}</p><p className="mt-2 text-xs text-text-muted">Vencimento atual: {renewingKey.expiresAt ? new Date(renewingKey.expiresAt).toLocaleString("pt-BR") : "—"}</p></div>
+          <label className="flex flex-col gap-1 text-sm">Renovar por<select className="rounded-lg border border-border bg-background p-2" value={renewPlan} onChange={(e) => setRenewPlan(e.target.value)}><option value="3d">3 dias</option><option value="7d">7 dias</option><option value="15d">15 dias</option><option value="30d">30 dias</option></select></label>
+          <p className="text-xs text-text-muted">A mesma chave será mantida. O prazo é somado ao vencimento atual ou começa agora se já expirou. Política de uso justo: 80 milhões de tokens por hora.</p>
+          <div className="flex justify-end gap-2"><Button variant="secondary" onClick={() => setRenewingKey(null)} disabled={renewBusy}>Cancelar</Button><Button onClick={handleRenewKey} disabled={renewBusy}>{renewBusy ? "Renovando..." : "Confirmar renovação"}</Button></div>
+        </div>}
+      </Modal>
+
       {/* Add Key Modal */}
       <Modal
         isOpen={showAddModal}
@@ -1109,17 +1193,53 @@ export default function APIPageClient({ machineId }) {
         onClose={() => {
           setShowAddModal(false);
           setNewKeyName("");
+          setNewKeyEmail("");
+          setNewKeyPlan("30d");
+          setNewKeyType("license");
         }}
       >
         <div className="flex flex-col gap-4">
+          <div className="grid grid-cols-2 gap-2">
+            <button type="button" onClick={() => setNewKeyType("normal")} className={`rounded-lg border p-3 text-sm font-medium ${newKeyType === "normal" ? "border-primary bg-primary/10 text-primary" : "border-border"}`}>
+              Chave normal
+              <span className="block mt-1 text-xs font-normal text-text-muted">Sem vencimento</span>
+            </button>
+            <button type="button" onClick={() => setNewKeyType("license")} className={`rounded-lg border p-3 text-sm font-medium ${newKeyType === "license" ? "border-primary bg-primary/10 text-primary" : "border-border"}`}>
+              Licença por plano
+              <span className="block mt-1 text-xs font-normal text-text-muted">3 a 30 dias</span>
+            </button>
+          </div>
           <Input
-            label="Key Name"
+            label="Nome da chave"
             value={newKeyName}
             onChange={(e) => setNewKeyName(e.target.value)}
-            placeholder="Production Key"
+            placeholder="Cliente / Produção"
           />
+          {newKeyType === "license" && (
+            <>
+              <Input
+                label="E-mail do cliente"
+                value={newKeyEmail}
+                onChange={(e) => setNewKeyEmail(e.target.value)}
+                placeholder="cliente@exemplo.com"
+              />
+              <label className="flex flex-col gap-1 text-sm text-text-main">
+                Plano da licença
+                <select className="rounded-lg border border-border bg-background p-2" value={newKeyPlan} onChange={(e) => setNewKeyPlan(e.target.value)}>
+                  <option value="3d">3 dias</option>
+                  <option value="7d">7 dias</option>
+                  <option value="15d">15 dias</option>
+                  <option value="30d">30 dias</option>
+                </select>
+              </label>
+              <p className="text-xs text-text-muted">A chave terá o prazo selecionado e só poderá acessar os combos publicados.</p>
+            </>
+          )}
+          {newKeyType === "normal" && (
+            <p className="text-xs text-text-muted">Chave administrativa normal, sem vencimento. Também terá acesso somente aos combos publicados.</p>
+          )}
           <div className="flex gap-2">
-            <Button onClick={handleCreateKey} fullWidth disabled={!newKeyName.trim()}>
+            <Button onClick={handleCreateKey} fullWidth disabled={newKeyType === "normal" ? !newKeyName.trim() : !newKeyEmail.trim()}>
               Create
             </Button>
             <Button
@@ -1135,6 +1255,8 @@ export default function APIPageClient({ machineId }) {
           </div>
         </div>
       </Modal>
+
+
 
       {/* Created Key Modal */}
       <Modal

@@ -83,6 +83,18 @@ async function runHeavyStartup() {
   await cleanupProviderConnections();
   const settings = await getSettings();
 
+  // Password-source transparency (never logs the secret itself): the login
+  // route checks the DB hash first and only falls back to INITIAL_PASSWORD
+  // on fresh installs. Operators often edit .env and run `restart` (which
+  // does NOT re-read env_file — only `up -d` recreates) or hit a volume that
+  // already stores a hash; this line tells exactly which source is active.
+  try {
+    const pwdSource = settings.password
+      ? "database-stored (INITIAL_PASSWORD is ignored)"
+      : (process.env.INITIAL_PASSWORD ? "env:INITIAL_PASSWORD" : "default-123456");
+    console.log(`[InitApp] dashboard password source: ${pwdSource}`);
+  } catch { /* never break boot for a log line */ }
+
   // Auto-resume tunnel (once per process)
   if (settings.tunnelEnabled && !g.tunnelAutoResumed) {
     g.tunnelAutoResumed = true;
@@ -118,6 +130,18 @@ async function runHeavyStartup() {
   import("@/sse/services/backgroundTokenRefresh.js")
     .then(({ startBackgroundTokenRefresh }) => startBackgroundTokenRefresh())
     .catch((e) => console.log("[BackgroundTokenRefresh] scheduler start failed:", e.message));
+
+  // TXT proxy-list auto-sync (default every 5 min for sources with autoUpdate).
+  // Module is idempotent and also started from custom-server.js.
+  import("@/sse/services/proxyListAutoSync.js")
+    .then(({ startProxyListAutoSync }) => startProxyListAutoSync())
+    .catch((e) => console.log("[ProxyListAutoSync] scheduler start failed:", e.message));
+
+  // Proxy auto-health (default every 1 min, least-recently-tested batch).
+  // Module is idempotent and also started from custom-server.js.
+  import("@/sse/services/proxyAutoHealth.js")
+    .then(({ startProxyAutoHealth }) => startProxyAutoHealth())
+    .catch((e) => console.log("[ProxyAutoHealth] scheduler start failed:", e.message));
 }
 
 function hasQuotaAutoPingEnabled(settings) {
