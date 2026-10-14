@@ -24,6 +24,12 @@ function loadJwtSecret() {
 
 const SECRET = new TextEncoder().encode(loadJwtSecret());
 
+/** Raw server secret string (JWT_SECRET or generated file) — key material for
+ *  server-side encryption (e.g. TOTP secrets at rest). Never send to clients. */
+export function getServerSecret() {
+  return loadJwtSecret();
+}
+
 export function shouldUseSecureCookie(request) {
   const forceSecureCookie = process.env.AUTH_COOKIE_SECURE === "true";
   const forwardedProto = request?.headers?.get?.("x-forwarded-proto");
@@ -72,6 +78,31 @@ export async function setDashboardAuthCookie(cookieStore, request, claims = {}) 
 
 export function clearDashboardAuthCookie(cookieStore) {
   cookieStore.delete("auth_token");
+}
+
+/**
+ * Short-lived challenge token for the second login step. Proves the caller
+ * passed password auth within the last 5 minutes; the verify endpoint checks
+ * the stage claim so a regular session token (or a forged object) cannot be
+ * substituted. Never grants dashboard access by itself.
+ */
+export async function createLoginChallenge() {
+  return new SignJWT({ stage: "2fa-login" })
+    .setProtectedHeader({ alg: "HS256" })
+    .setIssuedAt()
+    .setExpirationTime("5m")
+    .sign(SECRET);
+}
+
+export async function verifyLoginChallenge(token) {
+  if (!token || typeof token !== "string") return null;
+  try {
+    const { payload } = await jwtVerify(token, SECRET);
+    if (payload?.stage !== "2fa-login") return null;
+    return payload;
+  } catch {
+    return null;
+  }
 }
 
 // Verify the current dashboard password (re-auth for sensitive actions).

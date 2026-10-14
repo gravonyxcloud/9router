@@ -28,6 +28,7 @@ const PUBLIC_API_PATHS = [
   "/api/init",
   "/api/locale",
   "/api/auth/login",
+  "/api/auth/login/verify",
   "/api/auth/logout",
   "/api/auth/status",
   "/api/auth/oidc",

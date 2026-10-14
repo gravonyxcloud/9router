@@ -18,6 +18,9 @@ export default function LoginPage() {
   const [samlLoginLabel, setSamlLoginLabel] = useState("Sign in with SAML SSO");
   const [mustChange, setMustChange] = useState(false);
   const [newPassword, setNewPassword] = useState("");
+  const [need2fa, setNeed2fa] = useState(false);
+  const [challenge, setChallenge] = useState("");
+  const [totpCode, setTotpCode] = useState("");
 
   // Countdown for rate-limit
   useEffect(() => {
@@ -82,11 +85,42 @@ export default function LoginPage() {
           setMustChange(true);
           return;
         }
+        if (data.need2fa && data.challenge) {
+          setChallenge(data.challenge);
+          setTotpCode("");
+          setNeed2fa(true);
+          return;
+        }
         window.location.assign("/dashboard");
       } else {
         const data = await res.json();
         setError(data.error || "Invalid password");
         if (data.resetHint) setResetHint(data.resetHint);
+        if (data.retryAfter) setRetryAfter(Number(data.retryAfter));
+      }
+    } catch (err) {
+      setError("An error occurred. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Second step: TOTP code (or a recovery code) against the login challenge.
+  const handleVerify2fa = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch("/api/auth/login/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ challenge, code: totpCode }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success) {
+        window.location.assign("/dashboard");
+      } else {
+        setError(data.error || "Invalid code");
         if (data.retryAfter) setRetryAfter(Number(data.retryAfter));
       }
     } catch (err) {
@@ -166,7 +200,43 @@ export default function LoginPage() {
         </div>
 
         <Card>
-          {mustChange ? (
+          {need2fa ? (
+            <form onSubmit={handleVerify2fa} className="flex flex-col gap-4">
+              <p className="text-sm text-text-muted text-center">
+                Two-factor authentication is enabled. Enter the 6-digit code from your authenticator app.
+              </p>
+              <div className="flex flex-col gap-2">
+                <label className="text-sm font-medium">Authenticator code</label>
+                <Input
+                  placeholder="123456"
+                  value={totpCode}
+                  onChange={(e) => setTotpCode(e.target.value)}
+                  required
+                  autoFocus
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                />
+                {error && <p className="text-xs text-red-500">{error}</p>}
+                {retryAfter > 0 && (
+                  <p className="text-xs text-amber-600 dark:text-amber-400">
+                    Locked. Retry in <span className="font-mono">{retryAfter}s</span>.
+                  </p>
+                )}
+              </div>
+              <Button
+                type="submit"
+                variant="primary"
+                className="w-full"
+                loading={loading}
+                disabled={!totpCode || retryAfter > 0}
+              >
+                {retryAfter > 0 ? `Wait ${retryAfter}s` : "Verify"}
+              </Button>
+              <p className="text-xs text-center text-text-muted">
+                Lost your phone? Type a recovery code (XXXX-XXXX) instead.
+              </p>
+            </form>
+          ) : mustChange ? (
             <form onSubmit={handleSetNewPassword} className="flex flex-col gap-4">
               <p className="text-sm text-amber-600 dark:text-amber-400 text-center">
                 Set a new password before accessing the dashboard remotely.

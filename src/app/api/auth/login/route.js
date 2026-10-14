@@ -7,6 +7,7 @@ import { isOidcConfigured } from "@/lib/auth/oidc";
 import { isSamlConfigured } from "@/lib/auth/saml.js";
 import { checkLock, recordFail, recordSuccess, getClientIp } from "@/lib/auth/loginLimiter";
 import { resolveInitialPassword } from "@/lib/auth/initialPassword";
+import { createLoginChallenge } from "@/lib/auth/dashboardSession";
 import { isLocalRequest } from "@/dashboardGuard";
 
 const RESET_HINT = "Forgot password? Reset to default via 9Router CLI → Settings → Reset Password to Default.";
@@ -63,6 +64,13 @@ export async function POST(request) {
 
     if (isValid) {
       recordSuccess(ip);
+
+      // Password OK but 2FA enrolled → hold the session and issue a
+      // short-lived challenge for the second step. No cookie is set here.
+      if (settings?.totp?.enabled === true) {
+        const challenge = await createLoginChallenge();
+        return NextResponse.json({ success: false, need2fa: true, challenge }, { headers: NO_STORE_HEADERS });
+      }
 
       // Default password still in use on a remote client → force a password
       // change before the dashboard is exposed remotely (keeps local UX intact).

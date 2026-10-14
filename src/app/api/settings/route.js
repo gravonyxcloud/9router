@@ -11,13 +11,16 @@ const SETTINGS_RESPONSE_HEADERS = {
   "Cache-Control": "no-store"
 };
 
-// Secrets must never be mass-assigned from request body (CWE-915)
-const PROTECTED_SETTING_KEYS = ["password", "mitmSudoEncrypted"];
+// Secrets must never be mass-assigned from request body (CWE-915).
+// totp/totpPending are managed exclusively by /api/auth/2fa/* (encrypted
+// secret + hashed recovery codes) — direct writes could enable 2FA with an
+// attacker-known secret or wipe it.
+const PROTECTED_SETTING_KEYS = ["password", "mitmSudoEncrypted", "totp", "totpPending"];
 
 export async function GET() {
   try {
     const settings = await getSettings();
-    const { password, oidcClientSecret, ...safeSettings } = settings;
+    const { password, oidcClientSecret, totp, totpPending, ...safeSettings } = settings;
     safeSettings.oidcConfigured = !!(safeSettings.oidcIssuerUrl && safeSettings.oidcClientId && oidcClientSecret);
     
     const enableRequestLogs = process.env.ENABLE_REQUEST_LOGS === "true";
@@ -27,7 +30,8 @@ export async function GET() {
       ...safeSettings, 
       enableRequestLogs,
       enableTranslator,
-      hasPassword: !!password
+      hasPassword: !!password,
+      totpEnabled: settings?.totp?.enabled === true,
     }, { headers: SETTINGS_RESPONSE_HEADERS });
   } catch (error) {
     console.log("Error getting settings:", error);
