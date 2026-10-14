@@ -15,12 +15,20 @@ import { isRelayPoolType, testProxyPool, testProxyOpencodeTarget } from "@/lib/n
 
 const DEFAULT_INTERVAL_MS = 60 * 1000;
 const INITIAL_DELAY_MS = 45 * 1000;
-// Mass + fast: 300 pools/min covers a ~7k fleet in ~25 min. Worst-case tick
-// cost stays under the interval (300 / 30 concurrency * 2.5s ≈ 25s).
-// Relays (own deploys, cold starts) get a longer probe budget.
-const BATCH_SIZE = 300;
-const TEST_CONCURRENCY = 30;
-const TEST_TIMEOUT_MS = 2500;
+// Maxed throughput: 400 pools/min covers large fleets fast. Worst-case tick
+// cost stays under the interval (400 / 50 concurrency * 7s ≈ 56s).
+// 7s probe budget (was 2.5s): public proxies are slow — tight timeouts mark
+// working-but-slow pools dead and starve the opencode-ok set. Relays (own
+// deploys, cold starts) keep a longer budget. Override via env without rebuild:
+// PROXY_HEALTH_BATCH_SIZE / PROXY_HEALTH_CONCURRENCY / PROXY_HEALTH_TIMEOUT_MS.
+function envInt(name, fallback, min, max) {
+  const raw = Number(process.env[name]);
+  if (!Number.isFinite(raw) || raw <= 0) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(raw)));
+}
+const BATCH_SIZE = envInt("PROXY_HEALTH_BATCH_SIZE", 400, 10, 2000);
+const TEST_CONCURRENCY = envInt("PROXY_HEALTH_CONCURRENCY", 50, 1, 200);
+const TEST_TIMEOUT_MS = envInt("PROXY_HEALTH_TIMEOUT_MS", 7000, 1000, 30000);
 const RELAY_TEST_TIMEOUT_MS = 10000;
 
 let started = false;

@@ -38,6 +38,19 @@ describe("parseProxyLine", () => {
     expect(parseProxyLine("https://1.2.3.4:8080", "socks5")?.protocol).toBe("http");
   });
 
+  it("parses host:port:country labels (hideip.me shape), dropping the label", () => {
+    expect(parseProxyLine("170.245.132.85:999:Paraguay", "http")).toEqual({
+      protocol: "http",
+      host: "170.245.132.85",
+      port: 999,
+      username: "",
+      password: "",
+      proxyUrl: "http://170.245.132.85:999",
+    });
+    expect(parseProxyLine("1.2.3.4:1080:Germany", "socks5")?.proxyUrl).toBe("socks5://1.2.3.4:1080");
+    expect(parseProxyLine("1.2.3.4:notaport:Brazil", "http")).toBeNull();
+  });
+
   it("parses credentials in scheme and bare forms", () => {
     const viaScheme = parseProxyLine("socks5://user:p@ss@1.2.3.4:1080", "auto");
     expect(viaScheme?.username).toBe("user");

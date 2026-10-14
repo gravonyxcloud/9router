@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getSettings, updateSettings } from "@/lib/localDb";
 import { generateTotpSecret, buildOtpAuthUrl, encryptTotpSecret } from "@/lib/auth/totp";
 import { getServerSecret } from "@/lib/auth/dashboardSession";
+import QRCode from "qrcode";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -24,10 +25,18 @@ export async function POST() {
     await updateSettings({
       totpPending: { secretEnc, createdAt: new Date().toISOString() },
     });
+    const otpauthUrl = buildOtpAuthUrl({ secret, account: "dashboard", issuer: "9Router" });
+    let qrDataUrl = null;
+    try {
+      qrDataUrl = await QRCode.toDataURL(otpauthUrl, { width: 220, margin: 1 });
+    } catch {
+      // QR is convenience only — manual key entry below still works.
+    }
     return NextResponse.json(
       {
         secret,
-        otpauthUrl: buildOtpAuthUrl({ secret, account: "dashboard", issuer: "9Router" }),
+        otpauthUrl,
+        qrDataUrl,
         expiresInSec: Math.floor(PENDING_TTL_MS / 1000),
       },
       { headers: NO_STORE },

@@ -47,12 +47,13 @@ export async function runProxyListAutoSyncTick() {
     const results = [];
     for (const source of due) {
       try {
-        // Fast filter for background runs: short probe timeout, high
-        // concurrency. Manual "sync now" uses the thorough defaults.
+        // Thorough import probe: slow-but-working proxies must survive the
+        // import test or the opencode-ok set never grows. 8s budget, 40-way
+        // concurrency. Manual "sync now" uses the same values.
         const result = await syncProxyListSource(source, {
           testNew: true,
-          concurrency: 20,
-          testTimeoutMs: 4000,
+          concurrency: 40,
+          testTimeoutMs: 8000,
         });
         results.push({ sourceId: source.id, ok: result.ok, found: result.found || 0, imported: result.imported || 0, failed: result.failed || 0 });
         console.log(`[ProxyListAutoSync] ${source.name}: found=${result.found || 0} imported=${result.imported || 0} failed=${result.failed || 0}${result.ok ? "" : ` error=${result.error || "unknown"}`}`);

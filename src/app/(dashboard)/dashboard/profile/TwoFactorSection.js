@@ -12,6 +12,7 @@ export default function TwoFactorSection() {
   const [step, setStep] = useState("idle"); // idle | setup | recovery
   const [secret, setSecret] = useState("");
   const [otpauthUrl, setOtpauthUrl] = useState("");
+  const [qrDataUrl, setQrDataUrl] = useState("");
   const [code, setCode] = useState("");
   const [recoveryCodes, setRecoveryCodes] = useState([]);
   const [disablePassword, setDisablePassword] = useState("");
@@ -61,6 +62,7 @@ export default function TwoFactorSection() {
       }
       setSecret(data.secret || "");
       setOtpauthUrl(data.otpauthUrl || "");
+      setQrDataUrl(data.qrDataUrl || "");
       setCode("");
       setStep("setup");
     } catch {
@@ -88,6 +90,7 @@ export default function TwoFactorSection() {
       setRecoveryCodes(Array.isArray(data.recoveryCodes) ? data.recoveryCodes : []);
       setSecret("");
       setOtpauthUrl("");
+      setQrDataUrl("");
       setCode("");
       setStep("recovery");
       setEnabled(true);
@@ -168,7 +171,20 @@ export default function TwoFactorSection() {
       {step === "setup" && (
         <div className="flex flex-col gap-3 p-3 rounded-lg bg-black/5 dark:bg-white/5 border border-border/50">
           <p className="text-xs sm:text-sm">
-            1. In your authenticator app choose <b>Enter a setup key</b> with account <b>9Router</b> and this key:
+            1. Scan this QR code with your authenticator app (Google Authenticator, Authy, 1Password…):
+          </p>
+          {qrDataUrl ? (
+            <div className="flex justify-center bg-white p-3 rounded-lg self-center">
+              {/* eslint-disable-next-line @next/next/no-img-element — runtime data-URL (3KB QR), nothing to optimize */}
+              <img src={qrDataUrl} alt="TOTP enrollment QR code" width={200} height={200} />
+            </div>
+          ) : (
+            <p className="text-xs text-amber-600 dark:text-amber-400">
+              QR unavailable — use the manual key below instead.
+            </p>
+          )}
+          <p className="text-xs sm:text-sm">
+            Or choose <b>Enter a setup key</b> with account <b>9Router</b> and this key:
           </p>
           <div className="flex items-center gap-2">
             <code className="flex-1 font-mono text-sm break-all bg-sidebar px-2 py-1.5 rounded select-all">{secret}</code>

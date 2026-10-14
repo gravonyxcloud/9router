@@ -6,6 +6,7 @@
  *   [user:pass@]host:port
  *   host:port:user:pass
  *   user:pass:host:port
+ *   host:port:comment   (e.g. hideip.me appends the country: 1.2.3.4:8080:Brazil)
  *   host:port
  * Blank lines and # or // comments are ignored.
  */
@@ -118,6 +119,10 @@ function parseBareLine(line, defaultProtocol) {
   }
   const parts = line.split(":");
   if (parts.length === 2 && validHost(parts[0]) && validPort(parts[1])) {
+    return buildEntry(fallbackProtocol, parts[0], parts[1], "", "");
+  }
+  if (parts.length === 3 && validHost(parts[0]) && validPort(parts[1]) && parts[2].length > 0) {
+    // host:port:comment — trailing label (country, anonymity, ...) is ignored.
     return buildEntry(fallbackProtocol, parts[0], parts[1], "", "");
   }
   if (parts.length === 4) {
