@@ -6,6 +6,7 @@ import { setDashboardAuthCookie } from "@/lib/auth/dashboardSession";
 import { isOidcConfigured } from "@/lib/auth/oidc";
 import { isSamlConfigured } from "@/lib/auth/saml.js";
 import { checkLock, recordFail, recordSuccess, getClientIp } from "@/lib/auth/loginLimiter";
+import { resolveInitialPassword } from "@/lib/auth/initialPassword";
 import { isLocalRequest } from "@/dashboardGuard";
 
 const RESET_HINT = "Forgot password? Reset to default via 9Router CLI → Settings → Reset Password to Default.";
@@ -54,8 +55,9 @@ export async function POST(request) {
     if (storedHash) {
       isValid = await bcrypt.compare(password, storedHash);
     } else {
-      // Use env var or default
-      const initialPassword = process.env.INITIAL_PASSWORD || "123456";
+      // Use env var or default (normalized: trims whitespace/stray quotes so
+      // symbol passwords survive env-file transport layers).
+      const initialPassword = resolveInitialPassword() || "123456";
       isValid = password === initialPassword;
     }
 
@@ -65,7 +67,7 @@ export async function POST(request) {
       // Default password still in use on a remote client → force a password
       // change before the dashboard is exposed remotely (keeps local UX intact).
       const mustChangePassword =
-        !storedHash && !process.env.INITIAL_PASSWORD && !isLocalRequest(request);
+        !storedHash && !resolveInitialPassword() && !isLocalRequest(request);
 
       if (mustChangePassword) {
         // Do NOT issue a session token: a fresh install's default password is

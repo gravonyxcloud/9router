@@ -16,6 +16,7 @@ import {
 import { getMitmStatus, startMitm, loadEncryptedPassword, initDbHooks, restoreToolDNS, removeAllDNSEntriesSync } from "@/mitm/manager";
 import { syncToJson as syncMitmAliasCache } from "@/lib/mitmAliasCache";
 import { killAllBridges } from "@/lib/mcp/stdioSseBridge";
+import { resolveInitialPassword } from "@/lib/auth/initialPassword";
 
 // Inject correct paths and DB hooks into manager.js (CJS) from ESM context
 (function bootstrapMitm() {
@@ -91,7 +92,7 @@ async function runHeavyStartup() {
   try {
     const pwdSource = settings.password
       ? "database-stored (INITIAL_PASSWORD is ignored)"
-      : (process.env.INITIAL_PASSWORD ? "env:INITIAL_PASSWORD" : "default-123456");
+      : (resolveInitialPassword() ? "env:INITIAL_PASSWORD" : "default-123456");
     console.log(`[InitApp] dashboard password source: ${pwdSource}`);
   } catch { /* never break boot for a log line */ }
 
