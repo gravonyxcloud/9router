@@ -97,7 +97,7 @@ export async function GET(request) {
   const { getKeyAccessContext } = await import("@/sse/services/keyAccess.js");
   const keyContext = await getKeyAccessContext(request);
   if (keyContext) {
-    return Response.json({ error: { message: "Model details are available only through configured combos.", type: "not_found" } }, {
+    return Response.json({ error: { message: "Model details are not available.", type: "not_found" } }, {
       status: 404, headers: { "Access-Control-Allow-Origin": "*" },
     });
   }

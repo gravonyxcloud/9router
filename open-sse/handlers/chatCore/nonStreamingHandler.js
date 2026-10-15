@@ -4,7 +4,8 @@ import { ollamaBodyToOpenAI } from "../../translator/response/ollama-to-openai.j
 import { addBufferToUsage, filterUsageForFormat } from "../../utils/usageTracking.js";
 import { createErrorResult } from "../../utils/error.js";
 import { upstreamResponseHeaders } from "../../utils/upstreamHeaders.js";
-import { HTTP_STATUS } from "../../config/runtimeConfig.js";
+import { HTTP_STATUS, STREAM_STALL_TIMEOUT_MS } from "../../config/runtimeConfig.js";
+import { readBodyWithStallTimeout, UpstreamStallError } from "../../utils/bodyReader.js";
 import { parseSSEToOpenAIResponse } from "./sseToJsonHandler.js";
 import { unwrapClineEnvelope } from "../../shared/clineEnvelope.js";
 import { buildRequestDetail, extractRequestConfig, extractUsageFromResponse, saveUsageStats, formatDoneLine } from "./requestDetail.js";
@@ -240,8 +241,19 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   const contentType = providerResponse.headers.get("content-type") || "";
   let responseBody;
 
+  // All body reads are stall-bounded: a wedged upstream must 504 into combo
+  // fallback, never hang the client.
   if (contentType.includes("text/event-stream")) {
-    const sseText = await providerResponse.text();
+    let sseText;
+    try {
+      sseText = await readBodyWithStallTimeout(providerResponse, STREAM_STALL_TIMEOUT_MS);
+    } catch (err) {
+      if (err instanceof UpstreamStallError) {
+        appendLog({ status: `FAILED ${HTTP_STATUS.GATEWAY_TIMEOUT}` });
+        return createErrorResult(HTTP_STATUS.GATEWAY_TIMEOUT, "Upstream stalled while streaming the response");
+      }
+      throw err;
+    }
     const parsed = parseSSEToOpenAIResponse(sseText, model);
     if (!parsed) {
       appendLog({ status: `FAILED ${HTTP_STATUS.BAD_GATEWAY}` });
@@ -250,8 +262,13 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
     responseBody = parsed;
   } else {
     try {
-      responseBody = await providerResponse.json();
+      const text = await readBodyWithStallTimeout(providerResponse, STREAM_STALL_TIMEOUT_MS);
+      responseBody = JSON.parse(text);
     } catch (err) {
+      if (err instanceof UpstreamStallError) {
+        appendLog({ status: `FAILED ${HTTP_STATUS.GATEWAY_TIMEOUT}` });
+        return createErrorResult(HTTP_STATUS.GATEWAY_TIMEOUT, "Upstream stalled while sending the response");
+      }
       appendLog({ status: `FAILED ${HTTP_STATUS.BAD_GATEWAY}` });
       console.error(`[ChatCore] Failed to parse JSON from ${provider}:`, err.message);
       return createErrorResult(HTTP_STATUS.BAD_GATEWAY, `Invalid JSON response from ${provider}`);

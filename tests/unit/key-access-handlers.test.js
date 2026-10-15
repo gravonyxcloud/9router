@@ -2,6 +2,7 @@
 // gate runs before any credential lookup, and a restricted key calling an allowed
 // combo keeps combo failover (real combo.js).
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { KEY_ACCESS_COMBO_OWNER } from "../../src/shared/constants/keyAccess.js";
 
 const fx = vi.hoisted(() => ({
   combos: [
@@ -227,7 +228,7 @@ describe("/v1/models routes filter by key", () => {
     expect(emb.data.length).toBeGreaterThan(0);
     expect((await (await kind("sk-empty", ["embedding"])).json()).data).toEqual([]);
     const all = (await (await modelsRoute.GET(new Request("http://localhost/v1/models"))).json()).data;
-    const one = all.find((m) => m.owned_by !== "combo").id;
+    const one = all.find((m) => m.owned_by !== KEY_ACCESS_COMBO_OWNER).id;
     expect((await kind("sk-open", one.split("/"))).status).toBe(200);
     expect((await kind("sk-empty", one.split("/"))).status).toBe(404);
   });

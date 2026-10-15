@@ -3,7 +3,8 @@ import { restoreToolNames } from "../../utils/opencodeFingerprint.js";
 import { applyDisplayModel } from "../../utils/responseModelAlias.js";
 import { openAICompletionToClaudeMessage } from "./responseShapes.js";
 import { createErrorResult } from "../../utils/error.js";
-import { HTTP_STATUS } from "../../config/runtimeConfig.js";
+import { HTTP_STATUS, STREAM_STALL_TIMEOUT_MS } from "../../config/runtimeConfig.js";
+import { readBodyWithStallTimeout, UpstreamStallError } from "../../utils/bodyReader.js";
 import { FORMATS } from "../../translator/formats.js";
 import { PROVIDERS } from "../../config/providers.js";
 import { buildRequestDetail, extractRequestConfig, saveUsageStats, formatDoneLine } from "./requestDetail.js";
@@ -291,9 +292,18 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
     }
   }
 
-  // Standard Chat Completions SSE path
+  // Standard Chat Completions SSE path. The aggregation read is stall-bounded:
+  // a wedged upstream must 504 into combo fallback, never hang the client.
+  let sseText;
   try {
-    const sseText = await providerResponse.text();
+    sseText = await readBodyWithStallTimeout(providerResponse, STREAM_STALL_TIMEOUT_MS);
+  } catch (err) {
+    if (err instanceof UpstreamStallError) {
+      return createErrorResult(HTTP_STATUS.GATEWAY_TIMEOUT, "Upstream stalled while streaming the response");
+    }
+    throw err;
+  }
+  try {
     const parsed = parseSSEToOpenAIResponse(sseText, model);
     if (!parsed) return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Invalid SSE response for non-streaming request");
     if (parsed.error) {

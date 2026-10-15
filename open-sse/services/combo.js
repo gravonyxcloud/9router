@@ -6,6 +6,54 @@ import { checkFallbackError, formatRetryAfter } from "./accountFallback.js";
 import { unavailableResponse } from "../utils/error.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { extractTextContent } from "../translator/formats/gemini.js";
+import { readBodyWithStallTimeout } from "../utils/bodyReader.js";
+
+// Absolute per-seat budget for fallback combos: a seat that produces nothing
+// usable within this window yields to the next seat instead of hanging the
+// client (connect + queued TTFT + stall can otherwise stack to tens of
+// minutes across seats). Env: COMBO_SEAT_TIMEOUT_MS.
+function envMsLocal(name, def) {
+  const n = parseInt(process.env[name] || "", 10);
+  return Number.isFinite(n) && n > 0 ? n : def;
+}
+export const COMBO_SEAT_TIMEOUT_MS = envMsLocal("COMBO_SEAT_TIMEOUT_MS", 300000);
+
+/**
+ * Scrub real upstream seat ids from client-facing error text. When every
+ * seat fails (or a single seat error passes through), the raw upstream
+ * message typically names the real model ("Model big-pickle is ...") —
+ * replace full seat ids and their model parts with the combo name so routing
+ * stays opaque. Exact-substring replacement only (no regex).
+ */
+export function sanitizeComboErrorText(text, seats, comboName) {
+  let out = typeof text === "string" ? text : String(text ?? "");
+  const fallback = (typeof comboName === "string" && comboName) || "combo";
+  for (const seat of Array.isArray(seats) ? seats : []) {
+    if (typeof seat !== "string" || !seat) continue;
+    out = out.split(seat).join(fallback);
+    const slash = seat.lastIndexOf("/");
+    const modelPart = slash >= 0 ? seat.slice(slash + 1) : seat;
+    if (modelPart && modelPart.length >= 3 && modelPart !== fallback) {
+      out = out.split(modelPart).join(fallback);
+    }
+  }
+  return out;
+}
+
+// Rebuild an upstream error response with seat ids scrubbed. Fail-open:
+// any failure returns the original response untouched.
+async function sanitizePassthroughResponse(result, seats, comboName) {
+  try {
+    const text = await readBodyWithStallTimeout(result, 30000);
+    const clean = sanitizeComboErrorText(text, seats, comboName);
+    return new Response(clean, {
+      status: result.status || 502,
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch {
+    return result;
+  }
+}
 
 // Hard capabilities = input modalities; missing one drops request data (e.g. image
 // stripped). Must be prioritized. Soft (e.g. search) only degrades a feature.
@@ -302,7 +350,12 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
     log.info("COMBO", `Trying model ${i + 1}/${rotatedModels.length}: ${modelStr}`);
 
     try {
-      const result = await handleSingleModel(body, modelStr);
+      const raced = await withTimeout(handleSingleModel(body, modelStr), COMBO_SEAT_TIMEOUT_MS);
+      if (raced && typeof raced === "object" && "__timeout" in raced) {
+        throw new Error(`Combo seat timed out after ${Math.round(COMBO_SEAT_TIMEOUT_MS / 1000)}s`);
+      }
+      if (raced && typeof raced === "object" && "__error" in raced) throw raced.__error;
+      const result = raced;
       
       // Success (2xx) - return response
       if (result.ok) {
@@ -336,7 +389,7 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
 
       if (!shouldFallback) {
         log.warn("COMBO", `Model ${modelStr} failed (no fallback)`, { status: result.status });
-        return result;
+        return sanitizePassthroughResponse(result, rotatedModels, comboName);
       }
 
       // For transient errors (503/502/504), wait for cooldown before falling through
@@ -366,7 +419,7 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
   // or have no active credentials. 503 is more accurate and retryable by clients.
   const allDisabled = lastError && lastError.toLowerCase().includes("no credentials");
   const status = allDisabled ? 503 : (lastStatus || 503);
-  const msg = lastError || "All combo models unavailable";
+  const msg = sanitizeComboErrorText(lastError || "All combo models unavailable", rotatedModels, comboName);
 
   if (earliestRetryAfter) {
     const retryHuman = formatRetryAfter(earliestRetryAfter);

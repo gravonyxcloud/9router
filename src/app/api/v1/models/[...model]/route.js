@@ -1,5 +1,6 @@
 import { buildModelsList } from "../route.js";
 import { getKeyAccessContext, filterModelsListForKey } from "@/sse/services/keyAccess.js";
+import { KEY_ACCESS_COMBO_OWNER } from "@/shared/constants/keyAccess.js";
 
 // URL slug → service kind(s). `web` covers both webSearch and webFetch.
 const KIND_SLUG_MAP = {
@@ -54,7 +55,7 @@ export async function GET(request, { params }) {
     // Match the same LLM catalog exposed by GET /v1/models. A catch-all
     // parameter is required because provider-prefixed IDs contain a slash.
     const comboModels = (await buildModelsList([LLM_KIND]))
-      .filter((candidate) => candidate?.owned_by === "combo");
+      .filter((candidate) => candidate?.owned_by === KEY_ACCESS_COMBO_OWNER);
     const models = await filterModelsListForKey(keyAccess, comboModels);
     const matchedModel = models.find((candidate) => candidate.id === identifier);
 

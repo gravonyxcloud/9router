@@ -24,7 +24,7 @@ vi.mock("@/sse/utils/logger.js", () => ({ warn: vi.fn(), info: vi.fn(), debug: v
 
 const engine = await import("../../src/sse/services/keyAccess.js");
 const helpers = await import("../../src/shared/utils/keyAccess.js");
-const { keyAccessDeniedMessage, KEY_ACCESS_MAX_ENTRIES } = await import("../../src/shared/constants/keyAccess.js");
+const { keyAccessDeniedMessage, KEY_ACCESS_MAX_ENTRIES, KEY_ACCESS_COMBO_OWNER } = await import("../../src/shared/constants/keyAccess.js");
 
 function key(id, access) {
   fx.keys[`sk-${id}`] = { id, name: `key-${id}`, isActive: true, access };
@@ -140,7 +140,7 @@ describe("empty list blocks everything", () => {
     const ctx = await ctxFor("sk-empty");
     expect((await engine.enforceKeyAccessProvider(ctx, "tavily", null)).status).toBe(403);
     expect((await engine.enforceKeyAccessResolved(ctx, "openai/model-a", "openai", "model-a")).status).toBe(403);
-    expect(await engine.filterModelsListForKey(ctx, [{ id: "Main", owned_by: "combo" }, { id: "openai/model-a", owned_by: "openai" }])).toEqual([]);
+    expect(await engine.filterModelsListForKey(ctx, [{ id: "Main", owned_by: KEY_ACCESS_COMBO_OWNER }, { id: "openai/model-a", owned_by: "openai" }])).toEqual([]);
   });
 });
 
@@ -174,8 +174,8 @@ describe("provider-as-model (search / fetch)", () => {
 
 describe("/v1/models filtering", () => {
   const list = [
-    { id: "Main", object: "model", owned_by: "combo" },
-    { id: "other", object: "model", owned_by: "combo" },
+    { id: "Main", object: "model", owned_by: KEY_ACCESS_COMBO_OWNER },
+    { id: "other", object: "model", owned_by: KEY_ACCESS_COMBO_OWNER },
     { id: "openai/model-a", object: "model", owned_by: "openai" },
     { id: "openai/model-b", object: "model", owned_by: "openai" },
     { id: "cx/gpt-5", object: "model", owned_by: "cx" },
