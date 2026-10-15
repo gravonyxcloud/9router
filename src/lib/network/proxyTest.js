@@ -1,5 +1,5 @@
 import { ProxyAgent, fetch as undiciFetch } from "undici";
-import { isSocksProxyUrl, isSocksTlsCertError, socksFetch } from "./socksFetch.js";
+import { isSocksProxyUrl, isStrictTls, socksFetch } from "./socksFetch.js";
 
 export const RELAY_POOL_TYPES = ["vercel", "cloudflare", "deno", "netlify"];
 
@@ -58,6 +58,26 @@ const OPENCODE_PROBE_HEADERS = {
 };
 
 /**
+ * Hard timeout race for SOCKS probes. The agent's internal connect ignores
+ * req.destroy/socket timeouts (OS TCP timeout ~21s wins), so without this a
+ * dead proxy burns the full OS timeout instead of the probe budget. The
+ * orphaned attempt settles on its own; we just stop waiting for it.
+ */
+async function withHardTimeout(promise, ms, message) {
+  let timer = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
  * Second-stage probe: can this proxy actually reach OpenCode (not just the
  * open internet)? A proxy may pass a generic HEAD-to-Google check while its
  * IP is burned at the upstream (429/403) — useless for 9Router traffic.
@@ -73,6 +93,7 @@ export async function testProxyOpencodeTarget(proxyUrl, { timeoutMs = 8000 } = {
   const budget = Number.isFinite(timeoutRaw) && timeoutRaw > 0 ? Math.min(timeoutRaw, 30000) : 8000;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), budget);
+  const startedAt = Date.now();
   let dispatcher = null;
   if (!isSocksProxyUrl(normalized)) {
     try {
@@ -82,12 +103,16 @@ export async function testProxyOpencodeTarget(proxyUrl, { timeoutMs = 8000 } = {
       return { ok: false, gated: false, status: 400, error: `Invalid proxy URL: ${err?.message || String(err)}` };
     }
   }
-  const isStrictTls = process.env.STRICT_SSL === "true" || process.env.STRICT_SSL === "1";
+  const strictTls = isStrictTls();
   const attempt = async (insecure) => {
     const init = { method: "GET", headers: { ...OPENCODE_PROBE_HEADERS }, signal: controller.signal };
     let res;
     if (isSocksProxyUrl(normalized)) {
-      res = await socksFetch(OPENCODE_PROBE_URL, init, normalized, { timeoutMs: budget, insecure });
+      res = await withHardTimeout(
+        socksFetch(OPENCODE_PROBE_URL, init, normalized, { timeoutMs: budget, socketTimeoutMs: budget, insecure }),
+        budget,
+        "OpenCode probe timed out",
+      );
     } else {
       const dispatch = insecure
         ? new ProxyAgent({ uri: normalized, requestTls: { rejectUnauthorized: false } })
@@ -103,18 +128,9 @@ export async function testProxyOpencodeTarget(proxyUrl, { timeoutMs = 8000 } = {
     return res;
   };
   try {
-    let res;
-    try {
-      res = await attempt(false);
-    } catch (err) {
-      // Health check probes the proxy, not the target's PKI: retry without
-      // cert verification (mirrors proxyAwareFetch TLS fallback).
-      if (!isStrictTls && isSocksTlsCertError(err)) {
-        res = await attempt(true);
-      } else {
-        throw err;
-      }
-    }
+    // Insecure-first by default (probes the proxy, not the target's PKI);
+    // strict-only when the operator pinned STRICT_SSL (fail closed).
+    const res = !strictTls ? await attempt(true) : await attempt(false);
     // Drain a bounded prefix so keep-alive sockets don't pile up; the verdict
     // comes from the status code (catalog body is irrelevant here).
     try {
@@ -130,7 +146,7 @@ export async function testProxyOpencodeTarget(proxyUrl, { timeoutMs = 8000 } = {
     if (!res.ok) {
       return { ok: false, gated: false, status: res.status, error: `OpenCode probe HTTP ${res.status}` };
     }
-    return { ok: true, gated: false, status: res.status, elapsedMs: 0 };
+    return { ok: true, gated: false, status: res.status, elapsedMs: Date.now() - startedAt };
   } catch (err) {
     const message = err?.name === "AbortError" ? "OpenCode probe timed out" : getErrorMessage(err);
     return { ok: false, gated: false, status: 500, error: message || "OpenCode probe failed" };
@@ -147,8 +163,7 @@ export async function testProxyOpencodeTarget(proxyUrl, { timeoutMs = 8000 } = {
 const DEFAULT_TEST_URL = "http://www.google.com/generate_204";
 const DEFAULT_TIMEOUT_MS = 8000;
 
-function getErrorMessage(err) {
-  if (!err) return "Unknown error";
+function getErrorMessage(err) {  if (!err) return "Unknown error";
   const base = err?.message || String(err);
   const causeCode = err?.cause?.code || err?.code;
   const causeMessage = err?.cause?.message;
@@ -191,7 +206,7 @@ export async function testProxyUrl({ proxyUrl, testUrl, timeoutMs } = {}) {
     const controller = new AbortController();
     const startedAt = Date.now();
     const timer = setTimeout(() => controller.abort(), normalizedTimeoutMs);
-    const attempt = (insecure) => socksFetch(
+    const attempt = (insecure) => withHardTimeout(socksFetch(
       normalizedTestUrl,
       {
         method: "GET",
@@ -199,23 +214,12 @@ export async function testProxyUrl({ proxyUrl, testUrl, timeoutMs } = {}) {
         headers: { "User-Agent": "9Router" },
       },
       normalizedProxyUrl,
-      { timeoutMs: normalizedTimeoutMs, insecure },
-    );
+      { timeoutMs: normalizedTimeoutMs, socketTimeoutMs: normalizedTimeoutMs, insecure },
+    ), normalizedTimeoutMs, "Proxy test timed out");
     try {
-      let res;
-      try {
-        res = await attempt(false);
-      } catch (err) {
-        // Health check probes the proxy, not the target's PKI: retry
-        // without cert verification (mirrors proxyAwareFetch TLS fallback),
-        // unless the operator pinned strict TLS.
-        const strictTls = process.env.STRICT_SSL === "true" || process.env.STRICT_SSL === "1";
-        if (!strictTls && isSocksTlsCertError(err)) {
-          res = await attempt(true);
-        } else {
-          throw err;
-        }
-      }
+      // Insecure-first by default (probes the proxy, not the target's PKI);
+      // strict-only when the operator pinned STRICT_SSL (fail closed).
+      const res = await attempt(!isStrictTls());
       return {
         ok: res.ok,
         status: res.status,

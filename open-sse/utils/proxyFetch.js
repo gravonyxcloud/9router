@@ -1,7 +1,7 @@
 import { Readable } from "stream";
 import { MEMORY_CONFIG } from "../config/runtimeConfig.js";
 import { dbg } from "./debugLog.js";
-import { isSocksProxyUrl, isSocksTlsCertError } from "../../src/lib/network/socksFetch.js";
+import { isSocksProxyUrl, isStrictTls } from "../../src/lib/network/socksFetch.js";
 import { PROXY_FAILOVER_MAX_ATTEMPTS, noteProxyPoolResult } from "../../src/lib/network/proxyHealth.js";
 
 const originalFetch = globalThis.fetch;
@@ -260,16 +260,17 @@ async function fetchWithTlsFallback(url, options, proxyUrl) {
   // the operator pinned strict TLS.
   if (proxyUrl && isSocksProxyUrl(proxyUrl)) {
     const { socksFetch } = await import("../../src/lib/network/socksFetch.js");
-    try {
-      return await socksFetch(url, options, proxyUrl);
-    } catch (err) {
-      const isStrictSsl = process.env.STRICT_SSL === "true" || process.env.STRICT_SSL === "1";
-      if (!isStrictSsl && isSocksTlsCertError(err)) {
-        console.warn(`[ProxyFetch] SOCKS TLS cert verification failed (${err.cause?.code || err.code}), retrying with insecure TLS: ${url}`);
-        return await socksFetch(url, options, proxyUrl, { insecure: true });
-      }
-      throw err;
+    // Insecure-first by default (public egresses fail strict verification
+    // constantly); strict-only when the operator pinned STRICT_SSL.
+    if (!isStrictTls()) {
+      return await socksFetch(url, options, proxyUrl, { insecure: true });
     }
+    return await socksFetch(url, options, proxyUrl);
+  }
+  // HTTP(S) proxies through undici: same insecure-first default.
+  if (proxyUrl && !isStrictTls()) {
+    const dispatcher = await getDispatcher(proxyUrl, true);
+    return await originalFetch(url, { ...options, dispatcher });
   }
   try {
     const dispatcher = proxyUrl ? await getDispatcher(proxyUrl) : undefined;

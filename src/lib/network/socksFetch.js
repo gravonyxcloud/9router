@@ -55,10 +55,21 @@ export function isSocksTlsCertError(err) {
   return SOCKS_TLS_CERT_ERRORS.has(code);
 }
 
+/**
+ * Fail-closed TLS pinning, opt-in via env. Default (unset) accepts
+ * insecure: public-pool egresses routinely present expired/self-signed
+ * chain certs, so a strict-first attempt only wastes a handshake before the
+ * (previously automatic) insecure retry. With STRICT_SSL=true, cert errors
+ * throw instead of falling back.
+ */
+export function isStrictTls() {
+  return process.env.STRICT_SSL === "true" || process.env.STRICT_SSL === "1";
+}
+
 // 101/204/205/304 must have a null body — `new Response(stream, {status})` throws.
 const NULL_BODY_STATUS = new Set([101, 204, 205, 304]);
 
-export async function socksFetch(url, init = {}, proxyUrl, { timeoutMs = 20000, insecure = false } = {}) {
+export async function socksFetch(url, init = {}, proxyUrl, { timeoutMs = 20000, insecure = false, socketTimeoutMs = null } = {}) {
   if (!proxyUrl) throw new Error("socks proxy URL is required");
   const SocksProxyAgent = await loadSocksProxyAgent();
   if (!SocksProxyAgent) throw new Error("socks-proxy-agent unavailable");
@@ -91,7 +102,15 @@ export async function socksFetch(url, init = {}, proxyUrl, { timeoutMs = 20000, 
   // the rest of the stack allows minutes.
   const signal = init?.signal;
   const requestOptions = { method: init?.method || "GET", agent, headers };
-  if (!signal) requestOptions.timeout = timeoutMs;
+  if (!signal) {
+    requestOptions.timeout = timeoutMs;
+  } else if (socketTimeoutMs != null && Number(socketTimeoutMs) > 0) {
+    // Hard socket cap for probes: the AbortSignal path alone does not stop a
+    // wedged SOCKS handshake (agent sockets outlive req.destroy), so dead
+    // proxies would burn the OS TCP timeout (~21s) instead of the budget.
+    // Streaming callers omit it and stay signal-driven (reasoning pauses).
+    requestOptions.timeout = socketTimeoutMs;
+  }
   if (insecure) requestOptions.rejectUnauthorized = false;
   return new Promise((resolve, reject) => {
     let req;
