@@ -4,8 +4,33 @@ import { dbg } from "./debugLog.js";
 import { isSocksProxyUrl, isStrictTls } from "../../src/lib/network/socksFetch.js";
 import { PROXY_FAILOVER_MAX_ATTEMPTS, noteProxyPoolResult } from "../../src/lib/network/proxyHealth.js";
 
+/**
+ * Snapshot a 429 body for later surfacing: read the (small) error text now
+ * while the socket is fresh, keeping retry-after for downstream handling.
+ */
+async function snapshot429(response) {
+  let text = "";
+  try {
+    text = await response.text();
+  } catch { /* ignore */ }
+  let retryAfter = null;
+  try {
+    retryAfter = response.headers?.get?.("retry-after") || null;
+  } catch { /* ignore */ }
+  return { status: response.status || 429, retryAfter, text };
+}
+
 const originalFetch = globalThis.fetch;
 const proxyDispatchers = new Map();
+
+// Parallel race size: how many proxies to try at once per wave.
+// Sequential failover (1) waits out every dead proxy; racing takes the
+// first working egress and aborts the losers. Env: PROXY_RACE_SIZE.
+function proxyRaceSize() {
+  const raw = Number(process.env.PROXY_RACE_SIZE);
+  if (!Number.isFinite(raw) || raw < 1) return 3;
+  return Math.min(8, Math.floor(raw));
+}
 
 // ─── TLS fingerprinting via got-scraping (browser-like JA3) ───────────────
 // Disabled: not in use. Kept commented for future re-enable.
@@ -395,10 +420,12 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
   }
 
   if (proxyUrl) {
-    // Smart rotation: try the primary proxy, then failover candidates
-    // (sticky working pool first, failure cooldown respected). Each outcome
-    // is reported for stickiness, so traffic pins to a working proxy until
-    // it fails. Direct fallback only when every proxy failed (rare).
+    // Smart rotation with parallel waves: race a few proxies at once and
+    // take the first working egress instead of waiting out every dead one
+    // in sequence. 429s never win a race (burned IP) — they cool down while
+    // the wave waits for the rest. Outcomes still pin stickiness, so traffic
+    // converges on working proxies. Direct fallback only when every proxy
+    // failed or rate-limited (rare).
     const scope = normalizeString(proxyOptions?.proxyScope);
     const attempts = [{ proxyPoolId: proxyOptions?.proxyPoolId || null, url: proxyUrl, strict: proxyOptions?.strictProxy === true }];
     const seenUrls = new Set([proxyUrl]);
@@ -410,39 +437,94 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
       seenUrls.add(fUrl);
       attempts.push({ proxyPoolId: f.proxyPoolId || null, url: fUrl, strict: f.strictProxy === true });
     }
+    const raceSize = proxyRaceSize();
     let strictAny = false;
     let lastError = null;
-    for (let i = 0; i < attempts.length; i++) {
-      const attempt = attempts[i];
-      const attemptStartedAt = Date.now();
-      try {
-        const response = await fetchWithTlsFallback(url, options, attempt.url);
-        // 429 = this egress IP is burned (rate limited), not a transport
-        // failure: cool it down and rotate to the next proxy instead of
-        // pinning it sticky and surfacing the 429 to the client. The direct
-        // fallback below stays as the last resort (different egress IP).
-        if (response.status === 429 && i < attempts.length - 1) {
-          strictAny = strictAny || attempt.strict;
-          lastError = new Error(`HTTP 429 rate limited via pool ${attempt.proxyPoolId || "unknown"}`);
-          noteProxyPoolResult(scope, attempt.proxyPoolId, false);
-          try {
-            if (response.body && typeof response.body.cancel === "function") await response.body.cancel();
-            else await response.text();
-          } catch { /* drain best-effort so sockets don't pile up */ }
-          dbg("PROXY", `proxy ${i + 1}/${attempts.length} rate-limited (429), trying next proxy`);
-          continue;
-        }
-        noteProxyPoolResult(scope, attempt.proxyPoolId, true, Date.now() - attemptStartedAt);
-        if (i > 0) dbg("PROXY", `failover ${i}/${attempts.length - 1} via pool ${attempt.proxyPoolId || "unknown"} succeeded`);
-        return response;
-      } catch (proxyError) {
-        strictAny = strictAny || attempt.strict;
-        lastError = proxyError;
-        noteProxyPoolResult(scope, attempt.proxyPoolId, false);
-        if (i < attempts.length - 1) {
-          dbg("PROXY", `proxy ${i + 1}/${attempts.length} failed, trying next proxy: ${proxyError?.message || proxyError}`);
-        }
+    let first429 = null;
+    for (let waveStart = 0; waveStart < attempts.length; waveStart += raceSize) {
+      if (options.signal?.aborted) {
+        throw options.signal.reason || new Error("aborted");
       }
+      const wave = attempts.slice(waveStart, waveStart + raceSize);
+      const controllers = wave.map(() => new AbortController());
+      const onParentAbort = () => {
+        for (const c of controllers) {
+          try { c.abort(); } catch { /* ignore */ }
+        }
+      };
+      const parentSignal = options.signal;
+      if (parentSignal) {
+        if (parentSignal.aborted) onParentAbort();
+        else parentSignal.addEventListener("abort", onParentAbort, { once: true });
+      }
+      const pending = new Map();
+      wave.forEach((attempt, k) => {
+        const task = (async () => {
+          const attemptStartedAt = Date.now();
+          try {
+            const response = await fetchWithTlsFallback(url, { ...options, signal: controllers[k].signal }, attempt.url);
+            return { k, response, elapsedMs: Date.now() - attemptStartedAt };
+          } catch (error) {
+            return { k, error, elapsedMs: Date.now() - attemptStartedAt };
+          }
+        })();
+        pending.set(k, task);
+      });
+      let winner = null;
+      try {
+        while (pending.size > 0) {
+          const settled = await Promise.race([...pending.values()]);
+          pending.delete(settled.k);
+          const attempt = wave[settled.k];
+          if (settled.response) {
+            const response = settled.response;
+            // 429 = this egress IP is burned (rate limited), not a transport
+            // failure: cool it down and keep waiting for the rest of the wave
+            // instead of pinning it sticky and surfacing the 429.
+            if (response.status === 429) {
+              strictAny = strictAny || attempt.strict;
+              lastError = new Error(`HTTP 429 rate limited via pool ${attempt.proxyPoolId || "unknown"}`);
+              noteProxyPoolResult(scope, attempt.proxyPoolId, false);
+              if (!first429) first429 = await snapshot429(response);
+              else {
+                try {
+                  if (response.body && typeof response.body.cancel === "function") await response.body.cancel();
+                  else await response.text();
+                } catch { /* drain best-effort so sockets don't pile up */ }
+              }
+              dbg("PROXY", `proxy rate-limited (429) via pool ${attempt.proxyPoolId || "unknown"}, waiting wave`);
+              continue;
+            }
+            winner = { response, attempt, elapsedMs: settled.elapsedMs };
+            break;
+          }
+          strictAny = strictAny || attempt.strict;
+          lastError = settled.error;
+          noteProxyPoolResult(scope, attempt.proxyPoolId, false);
+        }
+      } finally {
+        try { parentSignal?.removeEventListener?.("abort", onParentAbort); } catch { /* ignore */ }
+      }
+      if (winner) {
+        for (let k = 0; k < controllers.length; k++) {
+          if (wave[k] === winner.attempt) continue;
+          try { controllers[k].abort(); } catch { /* ignore */ }
+        }
+        noteProxyPoolResult(scope, winner.attempt.proxyPoolId, true, winner.elapsedMs);
+        if (waveStart > 0 || wave.indexOf(winner.attempt) > 0) {
+          dbg("PROXY", `race won by pool ${winner.attempt.proxyPoolId || "unknown"} in ${winner.elapsedMs}ms`);
+        }
+        return winner.response;
+      }
+      // Wave exhausted with no usable response — next wave (if any).
+    }
+    // No wave produced a usable response: surface the first 429 (rebuilt —
+    // the original body was consumed racing the wave) for downstream
+    // account/combo fallback, else fail into direct/strict handling below.
+    if (first429) {
+      const headers = { "Content-Type": "application/json" };
+      if (first429.retryAfter) headers["retry-after"] = first429.retryAfter;
+      return new Response(first429.text, { status: 429, headers });
     }
     const finalMessage = lastError?.message || String(lastError || "all proxies failed");
     // If strictProxy is enabled, fail hard instead of falling back to direct
