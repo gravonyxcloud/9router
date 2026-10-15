@@ -12,6 +12,7 @@ export {
   deleteProviderNode,
   getProxyPools,
   getProxyPoolById,
+  getProxyPoolsCount,
   createProxyPool,
   updateProxyPool,
   deleteProxyPool,

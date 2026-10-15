@@ -8,7 +8,7 @@ export {
   reorderProviderConnections, cleanupProviderConnections,
   getProviderNodes, getProviderNodeById,
   createProviderNode, updateProviderNode, deleteProviderNode,
-  getProxyPools, getProxyPoolById,
+  getProxyPools, getProxyPoolById, getProxyPoolsCount,
   createProxyPool, updateProxyPool, deleteProxyPool,
   getProxyListSources, getProxyListSourceById,
   createProxyListSource, updateProxyListSource, deleteProxyListSource,

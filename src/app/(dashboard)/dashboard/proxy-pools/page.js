@@ -24,6 +24,10 @@ function formatLatency(ms) {
   return `${(n / 1000).toFixed(1)}s`;
 }
 
+// Rows per pools request. Fleets from list imports reach tens of thousands
+// of rows — the list loads page by page ("Show more") instead of stalling.
+const PAGE_SIZE = 200;
+
 function normalizeFormData(data = {}) {
   return {
     name: data.name || "",
@@ -54,6 +58,8 @@ function normalizeSourceFormData(data = {}) {
 export default function ProxyPoolsPage() {
   const [proxyPools, setProxyPools] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [poolsTotal, setPoolsTotal] = useState(null);
   const [showFormModal, setShowFormModal] = useState(false);
   const [showBatchImportModal, setShowBatchImportModal] = useState(false);
   const [showVercelModal, setShowVercelModal] = useState(false);
@@ -99,17 +105,23 @@ export default function ProxyPoolsPage() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [showRelayMenu]);
 
-  const fetchProxyPools = useCallback(async () => {
+  const fetchProxyPools = useCallback(async (offset = 0, append = false) => {
     try {
-      const res = await fetch("/api/proxy-pools?includeUsage=true", { cache: "no-store" });
+      if (!append) setLoading(true);
+      else setLoadingMore(true);
+      const res = await fetch(`/api/proxy-pools?includeUsage=true&limit=${PAGE_SIZE}&offset=${offset}`, { cache: "no-store" });
       const data = await res.json();
       if (res.ok) {
-        setProxyPools(data.proxyPools || []);
+        const rows = data.proxyPools || [];
+        setProxyPools((prev) => (append ? [...prev, ...rows] : rows));
+        if (typeof data.total === "number") setPoolsTotal(data.total);
+        else if (!append) setPoolsTotal(rows.length);
       }
     } catch (error) {
       console.log("Error fetching proxy pools:", error);
     } finally {
       setLoading(false);
+      setLoadingMore(false);
     }
   }, []);
 
@@ -932,6 +944,7 @@ export default function ProxyPoolsPage() {
             <Button icon="add" onClick={openCreateModal}>Add Proxy Pool</Button>
           </div>
         ) : (
+          <>
           <div className="flex flex-col divide-y divide-black/[0.04] dark:divide-white/[0.05]">
             {proxyPools.map((pool) => (
               <div key={pool.id} className="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1030,6 +1043,22 @@ export default function ProxyPoolsPage() {
               </div>
             ))}
           </div>
+          <div className="flex items-center justify-between pt-3">
+            <p className="text-xs text-text-muted">
+              Showing {proxyPools.length}{poolsTotal != null ? ` of ${poolsTotal}` : ""} pools
+            </p>
+            {poolsTotal != null && proxyPools.length < poolsTotal && (
+              <Button
+                size="sm"
+                variant="secondary"
+                loading={loadingMore}
+                onClick={() => fetchProxyPools(proxyPools.length, true)}
+              >
+                Show more
+              </Button>
+            )}
+          </div>
+          </>
         )}
       </Card>
 

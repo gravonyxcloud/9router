@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createProxyPool, getProviderConnections, getProxyPools } from "@/models";
+import { createProxyPool, getProviderConnections, getProxyPools, getProxyPoolsCount } from "@/models";
 
 function toBoolean(value) {
   if (value === "true") return true;
@@ -42,22 +42,34 @@ function buildUsageMap(connections = []) {
   return usageMap;
 }
 
-// GET /api/proxy-pools - List proxy pools
+// GET /api/proxy-pools - List proxy pools.
+// Paginated when `limit` is present (huge fleets from list imports would
+// otherwise serialize tens of thousands of rows per page load):
+//   /api/proxy-pools?limit=200&offset=0 -> { proxyPools, total, limit, offset }
+// Without `limit`, returns the legacy full { proxyPools } shape (dropdowns).
 export async function GET(request) {
   try {
     const { searchParams } = new URL(request.url);
     const isActive = toBoolean(searchParams.get("isActive"));
     const includeUsage = searchParams.get("includeUsage") === "true";
+    const rawLimit = Number(searchParams.get("limit"));
+    const paged = Number.isFinite(rawLimit) && rawLimit > 0;
+    const limit = paged ? Math.min(2000, Math.floor(rawLimit)) : null;
+    const rawOffset = Number(searchParams.get("offset"));
+    const offset = paged && Number.isFinite(rawOffset) && rawOffset > 0 ? Math.floor(rawOffset) : 0;
 
     const filter = {};
     if (isActive !== undefined) {
       filter.isActive = isActive;
     }
 
-    const proxyPools = await getProxyPools(filter);
+    const proxyPools = paged
+      ? await getProxyPools(filter, { limit, offset })
+      : await getProxyPools(filter);
+    const meta = paged ? { total: await getProxyPoolsCount(filter), limit, offset } : null;
 
     if (!includeUsage) {
-      return NextResponse.json({ proxyPools });
+      return NextResponse.json(paged ? { proxyPools, ...meta } : { proxyPools });
     }
 
     const connections = await getProviderConnections();
@@ -67,6 +79,7 @@ export async function GET(request) {
       ...pool,
       boundConnectionCount: usageMap.get(pool.id) || 0,
     }));
+    return NextResponse.json(paged ? { proxyPools: enrichedProxyPools, ...meta } : { proxyPools: enrichedProxyPools });
 
     return NextResponse.json({ proxyPools: enrichedProxyPools });
   } catch (error) {
