@@ -417,6 +417,21 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
       const attemptStartedAt = Date.now();
       try {
         const response = await fetchWithTlsFallback(url, options, attempt.url);
+        // 429 = this egress IP is burned (rate limited), not a transport
+        // failure: cool it down and rotate to the next proxy instead of
+        // pinning it sticky and surfacing the 429 to the client. The direct
+        // fallback below stays as the last resort (different egress IP).
+        if (response.status === 429 && i < attempts.length - 1) {
+          strictAny = strictAny || attempt.strict;
+          lastError = new Error(`HTTP 429 rate limited via pool ${attempt.proxyPoolId || "unknown"}`);
+          noteProxyPoolResult(scope, attempt.proxyPoolId, false);
+          try {
+            if (response.body && typeof response.body.cancel === "function") await response.body.cancel();
+            else await response.text();
+          } catch { /* drain best-effort so sockets don't pile up */ }
+          dbg("PROXY", `proxy ${i + 1}/${attempts.length} rate-limited (429), trying next proxy`);
+          continue;
+        }
         noteProxyPoolResult(scope, attempt.proxyPoolId, true, Date.now() - attemptStartedAt);
         if (i > 0) dbg("PROXY", `failover ${i}/${attempts.length - 1} via pool ${attempt.proxyPoolId || "unknown"} succeeded`);
         return response;

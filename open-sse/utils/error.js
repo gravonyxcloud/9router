@@ -121,8 +121,27 @@ export function createErrorResult(statusCode, message, resetsAtMs, extraHeaders 
     status: statusCode,
     error: message,
     resetsAtMs,
-    response: errorResponse(statusCode, message, extraHeaders)
+    response: errorResponse(statusCode, message, clampRetryAfter(extraHeaders))
   };
+}
+
+/**
+ * Cap client-facing retry-after at 30s. Upstream rate limits arrive with long
+ * windows (85s+) that make clients back off forever; meanwhile our proxy
+ * rotation + cooldowns free fresh egress much sooner, so clients should retry
+ * sooner, not later. Only numeric values are clamped (HTTP dates pass through).
+ */
+export const MAX_CLIENT_RETRY_AFTER_SEC = 30;
+
+export function clampRetryAfter(extraHeaders) {
+  if (!extraHeaders || typeof extraHeaders !== "object" || Array.isArray(extraHeaders)) return extraHeaders;
+  const out = { ...extraHeaders };
+  for (const key of Object.keys(out)) {
+    if (String(key).toLowerCase() !== "retry-after") continue;
+    const n = Number(out[key]);
+    if (Number.isFinite(n) && n > MAX_CLIENT_RETRY_AFTER_SEC) out[key] = String(MAX_CLIENT_RETRY_AFTER_SEC);
+  }
+  return out;
 }
 
 /**
@@ -134,7 +153,10 @@ export function createErrorResult(statusCode, message, resetsAtMs, extraHeaders 
  * @returns {Response}
  */
 export function unavailableResponse(statusCode, message, retryAfter, retryAfterHuman, extraHeaders = null) {
-  const retryAfterSec = Math.max(Math.ceil((new Date(retryAfter).getTime() - Date.now()) / 1000), 1);
+  const computed = Math.max(Math.ceil((new Date(retryAfter).getTime() - Date.now()) / 1000), 1);
+  // Capped (see MAX_CLIENT_RETRY_AFTER_SEC): long upstream windows stall
+  // clients while proxy rotation already frees fresh egress sooner.
+  const retryAfterSec = Math.min(computed, MAX_CLIENT_RETRY_AFTER_SEC);
   const msg = `${message} (${retryAfterHuman})`;
   return new Response(
     JSON.stringify({ error: { message: msg } }),
