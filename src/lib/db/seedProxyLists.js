@@ -8,6 +8,7 @@ import { stringifyJson } from "./helpers/jsonCol.js";
 // and existing installs are never touched or reseeded.
 export const SEED_MARKER_KEY = "proxyListsSeededV1";
 export const SEED_MARKER_V2 = "proxyListsSeededV2";
+export const SEED_MARKER_V3 = "proxyListsSeededV3";
 
 export const DEFAULT_PROXY_LIST_SOURCES = [
   { name: "ProxyScrape HTTP", url: "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all", protocol: "http" },
@@ -56,10 +57,49 @@ export const DEFAULT_PROXY_LIST_SOURCES = [
   { name: "hideip HTTP", url: "https://raw.githubusercontent.com/zloi-user/hideip.me/main/http.txt", protocol: "http" },
   { name: "hideip SOCKS4", url: "https://raw.githubusercontent.com/zloi-user/hideip.me/main/socks4.txt", protocol: "socks4" },
   { name: "hideip SOCKS5", url: "https://raw.githubusercontent.com/zloi-user/hideip.me/main/socks5.txt", protocol: "socks5" },
+  // V3 batch (2026-10-15, all fetch-validated live before seeding):
+  { name: "ProxyScrape jsDelivr All", url: "https://cdn.jsdelivr.net/gh/proxyscrape/free-proxy-list@main/proxies/all/data.txt", protocol: "http" },
+  { name: "ProxyScrape jsDelivr HTTP", url: "https://cdn.jsdelivr.net/gh/proxyscrape/free-proxy-list@main/proxies/protocols/http/data.txt", protocol: "http" },
+  { name: "ProxyScrape jsDelivr HTTPS", url: "https://cdn.jsdelivr.net/gh/proxyscrape/free-proxy-list@main/proxies/protocols/https/data.txt", protocol: "http" },
+  { name: "ProxyScrape V4 Full", url: "https://api.proxyscrape.com/v4/free-proxy-list/get?request=getproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all&skip=0&proxy_format=protocolipport&format=text&limit=2000", protocol: "http" },
+  { name: "ProxyScrape V4 HTTPS", url: "https://api.proxyscrape.com/v4/free-proxy-list/get?request=getproxies&protocol=https&timeout=10000&country=all&ssl=all&anonymity=all&skip=0&proxy_format=protocolipport&format=text&limit=2000", protocol: "http" },
+  { name: "ProxyScrape V2 Get", url: "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all", protocol: "http" },
+  { name: "ProxyScrape V3", url: "https://api.proxyscrape.com/v3/free-proxy-list/get?request=getproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all", protocol: "http" },
+  { name: "ProxyScrape V4 US", url: "https://api.proxyscrape.com/v4/free-proxy-list/get?request=getproxies&protocol=http&timeout=10000&country=US&ssl=all&anonymity=all&skip=0&proxy_format=protocolipport&format=text&limit=2000", protocol: "http" },
+  { name: "ProxyScrape V4 IN", url: "https://api.proxyscrape.com/v4/free-proxy-list/get?request=getproxies&protocol=http&timeout=10000&country=IN&ssl=all&anonymity=all&skip=0&proxy_format=protocolipport&format=text&limit=2000", protocol: "http" },
+  { name: "ProxiFly jsDelivr All", url: "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/all/data.txt", protocol: "auto" },
+  { name: "ProxiFly jsDelivr HTTP", url: "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt", protocol: "http" },
+  { name: "ProxiFly jsDelivr HTTPS", url: "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/https/data.txt", protocol: "http" },
+  { name: "ProxiFly Raw HTTP", url: "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt", protocol: "http" },
+  { name: "ProxiFly Raw HTTPS", url: "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/https/data.txt", protocol: "http" },
+  { name: "HProxy HTTP", url: "https://raw.githubusercontent.com/hproxy-com/free-proxy-list/main/http.txt", protocol: "http" },
+  { name: "HProxy HTTPS", url: "https://raw.githubusercontent.com/hproxy-com/free-proxy-list/main/https.txt", protocol: "http" },
+  { name: "HProxy All", url: "https://raw.githubusercontent.com/hproxy-com/free-proxy-list/main/all.txt", protocol: "auto" },
+  { name: "Proxio Raw All", url: "https://raw.githubusercontent.com/proxio-io/proxy-list/main/all.txt", protocol: "auto" },
+  { name: "Proxio Raw HTTP", url: "https://raw.githubusercontent.com/proxio-io/proxy-list/main/http.txt", protocol: "http" },
+  { name: "Proxio Raw HTTPS", url: "https://raw.githubusercontent.com/proxio-io/proxy-list/main/https.txt", protocol: "http" },
+  { name: "Proxio Download HTTP", url: "https://proxio.io/download?type=http&limit=2000", protocol: "http" },
+  { name: "Proxio Download HTTPS", url: "https://proxio.io/download?type=https&limit=2000", protocol: "http" },
+  { name: "GeoNode Page 4", url: "https://proxylist.geonode.com/api/proxy-list?limit=500&page=4&sort_by=lastChecked&sort_type=desc&protocols=http,https", protocol: "auto" },
+  { name: "GeoNode Page 5", url: "https://proxylist.geonode.com/api/proxy-list?limit=500&page=5&sort_by=lastChecked&sort_type=desc&protocols=http,https", protocol: "auto" },
+  { name: "Vakhov ProxyList", url: "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/proxylist.txt", protocol: "http" },
+  { name: "Mmpx HTTPS", url: "https://raw.githubusercontent.com/mmpx12/proxy-list/master/https.txt", protocol: "http" },
+  { name: "JetKai HTTPS", url: "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-https.txt", protocol: "http" },
+  { name: "MuRongPIG", url: "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/http.txt", protocol: "auto" },
+  { name: "Stormsia HTTP", url: "https://raw.githubusercontent.com/stormsia/proxy-list/main/http.txt", protocol: "http" },
+  { name: "Stormsia Working", url: "https://raw.githubusercontent.com/stormsia/proxy-list/main/working_proxies.txt", protocol: "http" },
+  { name: "OpenProxyList HTTPS", url: "https://api.openproxylist.xyz/https.txt", protocol: "http" },
+  { name: "ProxySpace HTTP", url: "https://proxyspace.pro/http.txt", protocol: "http" },
+  { name: "ProxySpace HTTPS", url: "https://proxyspace.pro/https.txt", protocol: "http" },
 ];
 
 export function seedDefaultProxyListSources(adapter) {
   try {
+    // Top-ups run on EVERY boot (URL-deduplicated, one-time per marker):
+    // factory sources added after V1 must reach existing installs too —
+    // placing them after the V1 early-returns below would skip them forever.
+    seedV2ProxyListSources(adapter);
+    seedV3ProxyListSources(adapter);
     if (getMetaSync(adapter, SEED_MARKER_KEY, null)) return { seeded: 0, skipped: "marked" };
     const existing = adapter.get(`SELECT COUNT(*) as c FROM proxyListSources`)?.c ?? 0;
     if (existing > 0) {
@@ -93,7 +133,6 @@ export function seedDefaultProxyListSources(adapter) {
       setMetaSync(adapter, SEED_MARKER_KEY, "1");
     });
     console.log(`[DB][migrate] seeded ${seeded} factory-default proxy list sources`);
-    seedV2ProxyListSources(adapter);
     return { seeded, skipped: null };
   } catch (err) {
     console.warn(`[DB][migrate] proxy list seed failed (continuing): ${err.message}`);
@@ -102,14 +141,13 @@ export function seedDefaultProxyListSources(adapter) {
 }
 
 /**
- * V2 top-up (2026-10-14): insert factory sources added after V1 without
- * touching user data. URL-deduplicated: sources the user deleted ARE
- * re-inserted (indistinguishable from never-seeded); the V2 marker keeps
- * this one-time per database.
+ * Shared top-up worker: insert factory sources added after a previous batch
+ * without touching user data. URL-deduplicated; the marker keeps each batch
+ * one-time per database.
  */
-export function seedV2ProxyListSources(adapter) {
+function seedMissingFactorySources(adapter, markerKey, label) {
   try {
-    if (getMetaSync(adapter, SEED_MARKER_V2, null)) return { seeded: 0, skipped: "marked" };
+    if (getMetaSync(adapter, markerKey, null)) return { seeded: 0, skipped: "marked" };
     const rows = adapter.all(`SELECT data FROM proxyListSources`) || [];
     const haveUrls = new Set();
     for (const row of rows) {
@@ -145,12 +183,29 @@ export function seedV2ProxyListSources(adapter) {
         );
         seeded += 1;
       }
-      setMetaSync(adapter, SEED_MARKER_V2, "1");
+      setMetaSync(adapter, markerKey, "1");
     });
-    if (seeded > 0) console.log(`[DB][migrate] seeded ${seeded} V2 factory proxy list sources`);
+    if (seeded > 0) console.log(`[DB][migrate] seeded ${seeded} ${label} factory proxy list sources`);
     return { seeded, skipped: null };
   } catch (err) {
-    console.warn(`[DB][migrate] proxy list V2 seed failed (continuing): ${err.message}`);
+    console.warn(`[DB][migrate] proxy list ${label} seed failed (continuing): ${err.message}`);
     return { seeded: 0, skipped: "error" };
   }
+}
+
+/**
+ * V2 top-up (2026-10-14): insert factory sources added after V1 without
+ * touching user data. URL-deduplicated: sources the user deleted ARE
+ * re-inserted (indistinguishable from never-seeded); the V2 marker keeps
+ * this one-time per database.
+ */
+export function seedV2ProxyListSources(adapter) {
+  return seedMissingFactorySources(adapter, SEED_MARKER_V2, "V2");
+}
+
+/**
+ * V3 top-up (2026-10-15, +34 sources): same merge semantics as V2.
+ */
+export function seedV3ProxyListSources(adapter) {
+  return seedMissingFactorySources(adapter, SEED_MARKER_V3, "V3");
 }
