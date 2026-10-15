@@ -5,6 +5,8 @@ import {
   proxyIdentityKey,
   poolProxyIdentity,
   normalizeListProtocol,
+  detectRandomApiPayload,
+  randomApiEntry,
 } from "../../src/lib/network/proxyListParser.js";
 
 describe("proxy list protocol", () => {
@@ -38,8 +40,7 @@ describe("parseProxyLine", () => {
     expect(parseProxyLine("https://1.2.3.4:8080", "socks5")?.protocol).toBe("http");
   });
 
-  it("parses host:port:country labels (hideip.me shape), dropping the label", () => {
-    expect(parseProxyLine("170.245.132.85:999:Paraguay", "http")).toEqual({
+  it("parses host:port:country labels (hideip.me shape), dropping the label", () => {    expect(parseProxyLine("170.245.132.85:999:Paraguay", "http")).toEqual({
       protocol: "http",
       host: "170.245.132.85",
       port: 999,
@@ -133,5 +134,48 @@ describe("proxy identity", () => {
     expect(poolProxyIdentity({ proxyUrl: "http://user:pw@1.2.3.4:8080" })).toBe("http://1.2.3.4:8080");
     expect(poolProxyIdentity({})).toBeNull();
     expect(poolProxyIdentity({ proxyUrl: "not a url at all !!!" })).toBe("raw:not a url at all !!!");
+  });
+});
+
+describe("random proxy API payloads", () => {
+  const payload = {
+    proxy: "144.124.251.24:10274",
+    http: "http://144.124.251.24:10274",
+    latency: 1444,
+    lastOk: "2026-10-15T13:13:09.347Z",
+  };
+
+  it("detects single-proxy objects and rejects lists/catalogs", () => {
+    expect(detectRandomApiPayload(JSON.stringify(payload))).toEqual(payload);
+    expect(detectRandomApiPayload("[{\"ip\":\"1.2.3.4\"}]")).toBeNull();
+    expect(detectRandomApiPayload("1.2.3.4:8080\n5.6.7.8:3128")).toBeNull();
+    expect(detectRandomApiPayload("not json")).toBeNull();
+    expect(detectRandomApiPayload(JSON.stringify({ foo: "bar" }))).toBeNull();
+  });
+
+  it("builds entries with seeded latency and check time", () => {
+    const entry = randomApiEntry(payload, "http");
+    expect(entry).toMatchObject({
+      protocol: "http",
+      host: "144.124.251.24",
+      port: 10274,
+      proxyUrl: "http://144.124.251.24:10274",
+      latencyMs: 1444,
+      opencodeLatencyMs: 1444,
+      opencodeCheckedAt: "2026-10-15T13:13:09.347Z",
+    });
+  });
+
+  it("falls back to the source protocol for bare host:port", () => {
+    const entry = randomApiEntry({ proxy: "9.9.9.9:1080" }, "socks5");
+    expect(entry?.proxyUrl).toBe("socks5://9.9.9.9:1080");
+    expect(entry?.latencyMs).toBeUndefined();
+  });
+
+  it("rejects unparseable payloads", () => {
+    expect(randomApiEntry(null)).toBeNull();
+    expect(randomApiEntry([])).toBeNull();
+    expect(randomApiEntry({})).toBeNull();
+    expect(randomApiEntry({ proxy: "not a proxy !!!" })).toBeNull();
   });
 });

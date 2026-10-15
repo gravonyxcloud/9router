@@ -98,6 +98,13 @@ export async function createProxyPool(data) {
     // traffic from this egress IP?).
     ...(data.opencodeOk !== undefined ? { opencodeOk: data.opencodeOk === true } : {}),
     ...(data.opencodeCheckedAt ? { opencodeCheckedAt: data.opencodeCheckedAt } : {}),
+    // Measured latencies (probe or harvest seed): drive fastest-first
+    // routing. Sanitized to finite non-negative integers.
+    ...(["latencyMs", "opencodeLatencyMs"].reduce((acc, key) => {
+      const ms = Number(data[key]);
+      if (Number.isFinite(ms) && ms >= 0) acc[key] = Math.round(ms);
+      return acc;
+    }, {})),
     createdAt: now,
     updatedAt: now,
   };

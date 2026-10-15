@@ -243,3 +243,51 @@ export function poolProxyIdentity(pool) {
   const entry = parseBareLine(trimmed, "http");
   return entry ? proxyIdentityKey(entry) : `raw:${trimmed.toLowerCase()}`;
 }
+
+/**
+ * Detect a "random proxy API" payload: a single JSON object (not a catalog
+ * array) carrying one working proxy, e.g.
+ *   {"proxy":"1.2.3.4:8080","http":"http://1.2.3.4:8080","latency":1444,"lastOk":"..."}
+ * Returns the parsed object, or null for list bodies / anything else.
+ */
+export function detectRandomApiPayload(text) {
+  let parsed;
+  try {
+    parsed = JSON.parse(String(text || ""));
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const hint = parsed.proxy ?? parsed.http ?? parsed.proxyUrl ?? parsed.url;
+  if (typeof hint !== "string" || !hint.trim()) return null;
+  return parsed;
+}
+
+/**
+ * Build a pool entry from a random-API payload. The measured `latency` seeds
+ * latencyMs/opencodeLatencyMs so fastest-first routing works immediately;
+ * `lastOk` seeds opencodeCheckedAt. Returns null when unparseable.
+ */
+export function randomApiEntry(payload, defaultProtocol = "http") {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const fallback = normalizeListProtocol(defaultProtocol) || "http";
+  const raw = String(payload.http || payload.proxyUrl || payload.url || payload.proxy || "").trim();
+  if (!raw) return null;
+  let entry = null;
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(raw)) {
+    entry = parseSchemeLine(raw, fallback);
+  } else {
+    entry = parseBareLine(raw, fallback);
+  }
+  if (!entry) return null;
+  const latency = Number(payload.latency ?? payload.latencyMs ?? payload.ms);
+  if (Number.isFinite(latency) && latency >= 0) {
+    entry.latencyMs = Math.round(latency);
+    entry.opencodeLatencyMs = Math.round(latency);
+  }
+  const checkedAt = payload.lastOk || payload.checkedAt || payload.lastChecked;
+  if (checkedAt && !Number.isNaN(new Date(checkedAt).getTime())) {
+    entry.opencodeCheckedAt = new Date(checkedAt).toISOString();
+  }
+  return entry;
+}

@@ -21,6 +21,8 @@ import {
   parseListBody,
   poolProxyIdentity,
   proxyIdentityKey,
+  detectRandomApiPayload,
+  randomApiEntry,
 } from "./proxyListParser.js";
 import { testProxyUrl } from "./proxyTest.js";
 
@@ -155,8 +157,111 @@ export async function syncProxyListSource(sourceOrId, options = {}) {
   }
 }
 
-async function runSync(source, startedAt, options = {}) {
-  const {
+const RANDOM_HARVEST_DEFAULT = 25;
+const RANDOM_HARVEST_MAX = 100;
+const RANDOM_HARVEST_CONCURRENCY = 5;
+
+async function runRandomHarvest(source, startedAt, options = {}) {
+  const fail = async (error) => {
+    const message = error?.message || String(error);
+    try {
+      await updateProxyListSource(source.id, {
+        lastFetchedAt: startedAt,
+        lastStatus: "error",
+        lastError: message.slice(0, 500),
+      });
+    } catch { /* stats must never break the caller */ }
+    return { ok: false, sourceId: source.id, found: 0, skipped: 0, imported: 0, newActive: 0, failed: 0, error: message, fetchedAt: startedAt };
+  };
+  const rawHarvest = Number(source?.data?.harvest ?? options.harvest ?? RANDOM_HARVEST_DEFAULT);
+  const polls = Math.min(RANDOM_HARVEST_MAX, Math.max(1, Number.isFinite(rawHarvest) ? Math.floor(rawHarvest) : RANDOM_HARVEST_DEFAULT));
+  const protocol = source.protocol || "auto";
+
+  const pollOnce = async () => {
+    try {
+      const text = await fetchProxyListText(source.url);
+      const payload = detectRandomApiPayload(text);
+      if (!payload) return null;
+      return randomApiEntry(payload, protocol);
+    } catch {
+      return null;
+    }
+  };
+  const results = await mapWithConcurrency(
+    Array.from({ length: polls }, (_, i) => i),
+    RANDOM_HARVEST_CONCURRENCY,
+    pollOnce,
+  );
+  const seen = new Set();
+  const unique = [];
+  for (const entry of results) {
+    if (!entry) continue;
+    const key = proxyIdentityKey(entry);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(entry);
+  }
+  if (unique.length === 0) {
+    return fail(new Error("Random API returned no usable proxies"));
+  }
+
+  let existingIdentities = new Set();
+  try {
+    const pools = await getProxyPools();
+    existingIdentities = new Set(pools.map(poolProxyIdentity).filter(Boolean));
+  } catch (err) {
+    return fail(new Error(`Failed to load existing pools: ${err?.message || err}`));
+  }
+
+  let imported = 0;
+  let failed = 0;
+  for (const entry of unique) {
+    if (existingIdentities.has(proxyIdentityKey(entry))) continue;
+    try {
+      // Pre-verified by the random API against the real target: import
+      // active with its measured latency seeded, so fastest-first routing
+      // works immediately. Our auto-health re-verifies on rotation.
+      // lastTestedAt stays null so the rotation tests these first.
+      await createProxyPool({
+        name: `${source.name} — ${entry.host}:${entry.port}`,
+        proxyUrl: entry.proxyUrl,
+        noProxy: "",
+        type: entry.protocol,
+        isActive: true,
+        testStatus: "active",
+        lastTestedAt: null,
+        lastError: null,
+        latencyMs: entry.latencyMs,
+        opencodeLatencyMs: entry.opencodeLatencyMs,
+        opencodeOk: true,
+        opencodeCheckedAt: entry.opencodeCheckedAt || new Date().toISOString(),
+        sourceId: source.id,
+        sourceName: source.name,
+        autoImported: true,
+      });
+      imported += 1;
+      existingIdentities.add(proxyIdentityKey(entry));
+    } catch {
+      failed += 1;
+    }
+  }
+
+  const stats = {
+    lastFetchedAt: new Date().toISOString(),
+    lastStatus: "ok",
+    lastError: null,
+    totalFound: unique.length,
+    totalNew: unique.length,
+    totalFailed: failed,
+    totalImported: imported,
+  };
+  try {
+    await updateProxyListSource(source.id, stats);
+  } catch { /* ignore */ }
+  return { ok: true, sourceId: source.id, found: unique.length, skipped: 0, imported, newActive: imported, failed, fetchedAt: startedAt };
+}
+
+async function runSync(source, startedAt, options = {}) {  const {
     testNew = true,
     concurrency = DEFAULT_TEST_CONCURRENCY,
     testTimeoutMs = DEFAULT_TEST_TIMEOUT_MS,
@@ -177,6 +282,14 @@ async function runSync(source, startedAt, options = {}) {
     text = await fetchProxyListText(source.url);
   } catch (err) {
     return fail(err);
+  }
+
+  // Random-proxy-API shape (single working proxy per call, e.g. a /v1/random
+  // endpoint): poll it repeatedly and harvest the working set instead of
+  // parsing a list. Auto-detected from the payload — no source-kind config.
+  const randomPayload = detectRandomApiPayload(text);
+  if (randomPayload) {
+    return runRandomHarvest(source, startedAt, options);
   }
 
   let entries = [];
