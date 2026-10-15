@@ -140,6 +140,8 @@ export async function runProxyAutoHealthTick() {
           });
           return { ok: false };
         }
+        const probeMs = Number(result.elapsedMs);
+        const latencyPatch = Number.isFinite(probeMs) && probeMs >= 0 ? { latencyMs: Math.round(probeMs) } : {};
         if (!isRelayPoolType(pool.type)) {
           let gated = null;
           try {
@@ -155,13 +157,23 @@ export async function runProxyAutoHealthTick() {
               lastError: (gated.error || `OpenCode probe HTTP ${gated.status}`).slice(0, 500),
               opencodeOk: false,
               opencodeCheckedAt: now,
+              ...latencyPatch,
             });
             return { ok: false };
           }
-          await stamp({ isActive: true, testStatus: "active", lastError: null, opencodeOk: true, opencodeCheckedAt: now });
+          const gatedMs = Number(gated.elapsedMs);
+          await stamp({
+            isActive: true,
+            testStatus: "active",
+            lastError: null,
+            opencodeOk: true,
+            opencodeCheckedAt: now,
+            ...latencyPatch,
+            ...(Number.isFinite(gatedMs) && gatedMs >= 0 ? { opencodeLatencyMs: Math.round(gatedMs) } : {}),
+          });
           return { ok: true };
         }
-        await stamp({ isActive: true, testStatus: "active", lastError: null });
+        await stamp({ isActive: true, testStatus: "active", lastError: null, ...latencyPatch });
         return { ok: true };
       } catch (err) {
         try {

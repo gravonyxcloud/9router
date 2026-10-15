@@ -1,5 +1,6 @@
 import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getProxyPools } from "@/lib/localDb";
 import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
+import { poolLatencyMs } from "@/lib/network/proxyHealth";
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
@@ -55,9 +56,12 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         // Prefer pools proven working against OpenCode itself, then generic
         // testStatus=active, then anything usable. Auto-health refreshes
         // both signals continuously; fallbacks keep traffic flowing cold.
+        // Within each tier, fastest-first by measured latency so interactive
+        // traffic stops drawing slow proxies in the rotation lottery.
         const opencodeOk = usable.filter(p => p.opencodeOk === true);
         const healthy = usable.filter(p => p.testStatus === "active");
-        const poolIds = (opencodeOk.length ? opencodeOk : healthy.length ? healthy : usable).map(p => p.id);
+        const tier = opencodeOk.length ? opencodeOk : healthy.length ? healthy : usable;
+        const poolIds = [...tier].sort((a, b) => poolLatencyMs(a) - poolLatencyMs(b)).map(p => p.id);
         pickedId = pickProxyPoolId(poolIds, strategy, providerId);
       }
       const resolvedProxy = await resolveConnectionProxyConfig({ proxyPoolId: pickedId || "" });

@@ -413,9 +413,10 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
     let lastError = null;
     for (let i = 0; i < attempts.length; i++) {
       const attempt = attempts[i];
+      const attemptStartedAt = Date.now();
       try {
         const response = await fetchWithTlsFallback(url, options, attempt.url);
-        noteProxyPoolResult(scope, attempt.proxyPoolId, true);
+        noteProxyPoolResult(scope, attempt.proxyPoolId, true, Date.now() - attemptStartedAt);
         if (i > 0) dbg("PROXY", `failover ${i}/${attempts.length - 1} via pool ${attempt.proxyPoolId || "unknown"} succeeded`);
         return response;
       } catch (proxyError) {

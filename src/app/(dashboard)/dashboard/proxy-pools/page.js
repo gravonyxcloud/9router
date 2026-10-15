@@ -17,6 +17,13 @@ function formatDateTime(value) {
   return date.toLocaleString();
 }
 
+function formatLatency(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n < 0) return "—";
+  if (n < 1000) return `${Math.round(n)}ms`;
+  return `${(n / 1000).toFixed(1)}s`;
+}
+
 function normalizeFormData(data = {}) {
   return {
     name: data.name || "",
@@ -944,6 +951,15 @@ export default function ProxyPoolsPage() {
                     {pool.opencodeOk === true && (
                       <Badge variant="success" size="sm" title="Reached OpenCode through this proxy">
                         opencode ok
+                      </Badge>
+                    )}
+                    {(pool.opencodeLatencyMs ?? pool.latencyMs) != null && (
+                      <Badge
+                        variant="default"
+                        size="sm"
+                        title={`Last measured latency (${pool.opencodeLatencyMs != null ? "OpenCode probe" : "generic probe"})`}
+                      >
+                        {formatLatency(pool.opencodeLatencyMs ?? pool.latencyMs)}
                       </Badge>
                     )}
                     <Badge variant={pool.isActive ? "success" : "default"} size="sm">
