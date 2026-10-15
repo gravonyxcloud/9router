@@ -75,12 +75,15 @@ export const RETRY_CONFIG = {
 };
 
 // Default retry config by status code: { attempts, delayMs }
+// Kept lean on purpose: each retry re-runs proxy failover + upstream
+// connect, so retries compound fast on dead paths. One spare attempt covers
+// blips; more mostly delays the combo fallback that would actually help.
 // Backward compat: if value is a number, treated as attempts with RETRY_CONFIG.delayMs
 export const DEFAULT_RETRY_CONFIG = {
   429: { attempts: 0, delayMs: 0 },
-  502: { attempts: 3, delayMs: 3000 },
-  503: { attempts: 3, delayMs: 2000 },
-  504: { attempts: 2, delayMs: 3000 }
+  502: { attempts: 2, delayMs: 1500 },
+  503: { attempts: 2, delayMs: 1500 },
+  504: { attempts: 1, delayMs: 1500 }
 };
 
 // Normalize a retry entry to { attempts, delayMs }
