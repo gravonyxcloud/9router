@@ -17,6 +17,16 @@ function envMsLocal(name, def) {
   return Number.isFinite(n) && n > 0 ? n : def;
 }
 export const COMBO_SEAT_TIMEOUT_MS = envMsLocal("COMBO_SEAT_TIMEOUT_MS", 300000);
+// Hedged fallback: when a seat produces nothing within this delay and seats
+// remain, start the next seat in parallel instead of waiting it out 1-by-1.
+// The first headers-stage response wins; losers get their bodies cancelled.
+// At most COMBO_HEDGE_MAX extra seats in flight per round. Env:
+// COMBO_HEDGE_DELAY_MS (0 disables), COMBO_HEDGE_MAX_EXTRA.
+export const COMBO_HEDGE_DELAY_MS = envMsLocal("COMBO_HEDGE_DELAY_MS", 20000);
+export const COMBO_HEDGE_MAX_EXTRA = (() => {
+  const n = parseInt(process.env.COMBO_HEDGE_MAX_EXTRA || "", 10);
+  return Number.isFinite(n) && n >= 0 ? Math.min(3, n) : 1;
+})();
 
 /**
  * Scrub real upstream seat ids from client-facing error text. When every
@@ -345,9 +355,13 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
   let earliestRetryAfter = null;
   let lastStatus = null;
 
-  for (let i = 0; i < rotatedModels.length; i++) {
-    const modelStr = rotatedModels[i];
-    log.info("COMBO", `Trying model ${i + 1}/${rotatedModels.length}: ${modelStr}`);
+  // Run one seat through the full single-model stack (bounded by the seat
+  // timeout). Resolves { done, response }: done=true carries the answer
+  // (success or non-fallback error), done=false means "try next seat".
+  // Never rejects — unexpected exceptions become fallback continuations.
+  const runSeat = async (idx) => {
+    const modelStr = rotatedModels[idx];
+    log.info("COMBO", `Trying model ${idx + 1}/${rotatedModels.length}: ${modelStr}`);
 
     try {
       const raced = await withTimeout(handleSingleModel(body, modelStr), COMBO_SEAT_TIMEOUT_MS);
@@ -360,7 +374,7 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       // Success (2xx) - return response
       if (result.ok) {
         log.info("COMBO", `Model ${modelStr} succeeded`);
-        return result;
+        return { done: true, response: result };
       }
 
       // Extract error info from response
@@ -389,7 +403,7 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
 
       if (!shouldFallback) {
         log.warn("COMBO", `Model ${modelStr} failed (no fallback)`, { status: result.status });
-        return sanitizePassthroughResponse(result, rotatedModels, comboName);
+        return { done: true, response: await sanitizePassthroughResponse(result, rotatedModels, comboName) };
       }
 
       // For transient errors (503/502/504), wait for cooldown before falling through
@@ -411,7 +425,64 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       if (!lastStatus) lastStatus = 500;
       log.warn("COMBO", `Model ${modelStr} threw error, trying next`, { error: lastError });
     }
+    return { done: false };
+  };
+
+  // Drive seats sequentially, hedging a slow seat with the next one: when
+  // the in-flight seat(s) produce nothing within COMBO_HEDGE_DELAY_MS,
+  // start the next seat in parallel (up to COMBO_HEDGE_MAX_EXTRA extras).
+  // First headers-stage completion wins; hedged losers get their bodies
+  // cancelled, but a loser that later succeeds is still honored if the
+  // winner failed.
+  const hedgeOn = COMBO_HEDGE_DELAY_MS > 0 && rotatedModels.length > 1;
+  let nextIdx = 0;
+  let hedgesUsed = 0;
+  const pending = new Map();
+  const launchSeat = (idx) => {
+    const p = runSeat(idx).then((outcome) => ({ idx, outcome }));
+    pending.set(idx, p);
+    return p;
+  };
+  const cancelPending = () => {
+    for (const [, p] of pending) {
+      p.then((s) => {
+        try { s?.outcome?.response?.body?.cancel?.(); } catch { /* ignore */ }
+      });
+    }
+    pending.clear();
+  };
+  let finalResponse = null;
+  while (nextIdx < rotatedModels.length || pending.size > 0) {
+    if (pending.size === 0 && nextIdx < rotatedModels.length) {
+      launchSeat(nextIdx++);
+    }
+    let settled = null;
+    if (hedgeOn && hedgesUsed < COMBO_HEDGE_MAX_EXTRA && nextIdx < rotatedModels.length && pending.size > 0) {
+      const raced = await Promise.race([
+        ...[...pending.values()].map((p) => p.then((s) => ({ tag: "seat", s }))),
+        new Promise((resolve) => setTimeout(() => resolve({ tag: "hedge" }), COMBO_HEDGE_DELAY_MS)),
+      ]);
+      if (raced.tag === "hedge") {
+        hedgesUsed += 1;
+        log.info("COMBO", `Hedging slow seat with model ${nextIdx + 1}/${rotatedModels.length}: ${rotatedModels[nextIdx]}`);
+        launchSeat(nextIdx++);
+        continue;
+      }
+      settled = raced.s;
+      pending.delete(settled.idx);
+    } else {
+      if (pending.size === 0) break;
+      settled = await Promise.race([...pending.values()]);
+      pending.delete(settled.idx);
+    }
+    if (settled.outcome?.done) {
+      finalResponse = settled.outcome.response;
+      cancelPending();
+      break;
+    }
+    // Fallback: keep going (pending hedges get their chance automatically).
   }
+  if (finalResponse) return finalResponse;
 
   // All models failed
   // Use 503 (Service Unavailable) rather than 406 (Not Acceptable) — 406 implies

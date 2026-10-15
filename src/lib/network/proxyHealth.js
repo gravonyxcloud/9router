@@ -122,6 +122,59 @@ export function poolLatencyMs(pool, now = Date.now()) {
 }
 
 /**
+ * Host-only fingerprint for failover diversity (never credentials).
+ */
+export function proxyPoolHost(pool) {
+  const raw = String(pool?.proxyUrl || "").trim();
+  if (!raw) return "";
+  const m = raw.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/(?:[^@/]*@)?([^\s/:]+)/);
+  if (m) return m[1].toLowerCase();
+  return raw.split(":")[0].toLowerCase();
+}
+
+/**
+ * Spread pools so consecutive entries land on different hosts: pools behind
+ * the same host usually share the same egress IP (and upstream quota), so
+ * back-to-back same-host attempts burn time re-proving the same gate.
+ * The head (fastest) stays fixed; the rest interleave round-robin by host.
+ */
+export function spreadHostsFirst(list) {
+  const arr = Array.isArray(list) ? [...list] : [];
+  if (arr.length <= 2) return arr;
+  const [head, ...rest] = arr;
+  const byHost = new Map();
+  for (const p of rest) {
+    const h = proxyPoolHost(p) || "(unknown)";
+    if (!byHost.has(h)) byHost.set(h, []);
+    byHost.get(h).push(p);
+  }
+  if (byHost.size <= 1) return arr;
+  // Start the round-robin on a host different from the head's so the first
+  // two entries never share an egress IP.
+  const headHost = proxyPoolHost(head) || "(unknown)";
+  const hostKeys = [...byHost.keys()];
+  const startIdx = hostKeys.findIndex((h) => h !== headHost);
+  const orderedKeys = startIdx > 0
+    ? [...hostKeys.slice(startIdx), ...hostKeys.slice(0, startIdx)]
+    : hostKeys;
+  const out = [head];
+  let remaining = rest.length;
+  while (remaining > 0) {
+    let moved = false;
+    for (const h of orderedKeys) {
+      const queue = byHost.get(h);
+      if (queue.length) {
+        out.push(queue.shift());
+        remaining -= 1;
+        moved = true;
+      }
+    }
+    if (!moved) break;
+  }
+  return out;
+}
+
+/**
  * Order pool candidates for failover attempts (pure, unit-testable).
  * [fast-sticky-if-valid, primary-if-present, rest by latency, cooling last],
  * capped at `limit` entries. Pools must be pre-filtered (active, non-relay,
@@ -157,6 +210,8 @@ export function orderProxyCandidates(pools, { primaryId = null, stickyId = null,
   const cooling = rest
     .filter((p) => failedMsAgo(p.id, now) !== Infinity)
     .sort((a, b) => failedMsAgo(b.id, now) - failedMsAgo(a.id, now));
-  for (const p of [...fresh, ...cooling]) push(p);
+  // Fresh pools come latency-ordered; spread same-host pools apart so
+  // consecutive attempts hit different egress IPs (cooling keeps recency).
+  for (const p of [...spreadHostsFirst(fresh), ...cooling]) push(p);
   return ordered.slice(0, Math.max(1, limit));
 }

@@ -5,6 +5,8 @@ import {
   poolLatencyMs,
   clearProxyHealth,
   STICKY_SLOW_MS,
+  proxyPoolHost,
+  spreadHostsFirst,
 } from "../../src/lib/network/proxyHealth.js";
 
 const pool = (id, extra = {}) => ({ id, proxyUrl: `http://${id}:8080`, ...extra });
@@ -50,5 +52,31 @@ describe("proxyHealth latency ordering", () => {
     const ordered = orderProxyCandidates(pools, { primaryId: "p2", limit: 2 }).map((p) => p.id);
     expect(ordered).toContain("p1");
     expect(ordered).toContain("p2");
+  });
+});
+
+describe("proxyHealth host diversity", () => {
+  const withHost = (id, host) => ({ id, proxyUrl: `http://${host}:8080` });
+
+  it("strips credentials from host fingerprints", () => {
+    expect(proxyPoolHost({ proxyUrl: "http://user:pw@1.2.3.4:8080" })).toBe("1.2.3.4");
+    expect(proxyPoolHost({})).toBe("");
+  });
+
+  it("interleaves hosts keeping the head fixed", () => {
+    const out = spreadHostsFirst([
+      withHost("a", "1.1.1.1"), withHost("b", "1.1.1.1"),
+      withHost("c", "2.2.2.2"), withHost("d", "1.1.1.1"),
+    ]).map((p) => p.id);
+    expect(out).toEqual(["a", "c", "b", "d"]);
+  });
+
+  it("separates same-host pools in candidate order", () => {
+    const pools = [
+      withHost("s1", "1.1.1.1"), withHost("s2", "1.1.1.1"), withHost("f", "2.2.2.2"),
+    ];
+    pools[0].latencyMs = 100; pools[1].latencyMs = 200; pools[2].latencyMs = 150;
+    const ordered = orderProxyCandidates(pools, { limit: 3 }).map((p) => p.id);
+    expect(ordered).toEqual(["s1", "f", "s2"]);
   });
 });
