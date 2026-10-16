@@ -5,11 +5,12 @@ import { buildChunk } from "../concerns/chunk.js";
 import { toOpenAIUsage } from "../concerns/usage.js";
 import { reasoningDelta } from "../concerns/reasoning.js";
 import { toOpenAIFinish } from "../concerns/finishReason.js";
+import { freshChatCompletionId, freshClaudeMessageId } from "../../utils/responseModelAlias.js";
 
 // Create OpenAI chunk helper
 function createChunk(state, delta, finishReason = null) {
   return buildChunk(
-    { id: `chatcmpl-${state.messageId}`, created: Math.floor(Date.now() / 1000), model: state.model },
+    { id: state.messageId && typeof state.messageId === "string" && state.messageId.startsWith("chatcmpl-") ? state.messageId : freshChatCompletionId(), created: Math.floor(Date.now() / 1000), model: state.model },
     delta,
     finishReason
   );
@@ -24,7 +25,7 @@ export function claudeToOpenAIResponse(chunk, state) {
 
   switch (event) {
     case "message_start": {
-      state.messageId = chunk.message?.id || `msg_${Date.now()}`;
+      state.messageId = freshClaudeMessageId();
       state.model = chunk.message?.model;
       state.toolCallIndex = 0;
       // Claude sends input_tokens + cache_read + cache_creation here; message_delta

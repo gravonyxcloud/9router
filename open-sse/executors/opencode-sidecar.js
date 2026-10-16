@@ -30,6 +30,7 @@ import { reasoningDelta } from "../translator/concerns/reasoning.js";
 import { toOpenAIFinish } from "../translator/concerns/finishReason.js";
 import { ROLE, OPENAI_FINISH } from "../translator/schema/index.js";
 import { SSE_DONE, SSE_HEADERS } from "../utils/sseConstants.js";
+import { freshChatCompletionId } from "../utils/responseModelAlias.js";
 import {
   SIDECAR_PROVIDER_ID,
   SIDECAR_BIN_ENV,
@@ -239,7 +240,7 @@ export class OpenCodeSidecarExecutor extends BaseExecutor {
       /* spawn failure (ENOENT) surfaces via exit code -2 / close below */
     });
 
-    const responseId = `chatcmpl-sidecar-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+    const responseId = freshChatCompletionId();
     const created = Math.floor(Date.now() / 1000);
     const displayModel = String(model || body?.model || upstreamModel);
     const encoder = new TextEncoder();

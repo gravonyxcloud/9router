@@ -6,6 +6,7 @@
 
 import fs from "fs";
 import path from "path";
+import { freshResponsesId } from "../utils/responseModelAlias.js";
 
 // Create log directory for responses (Node.js only)
 export function createResponsesLogger(model, logsDir = null) {
@@ -273,7 +274,7 @@ export function createResponsesApiTransformStream(logger = null) {
         // Emit initial events
         if (!state.started) {
           state.started = true;
-          state.responseId = parsed.id ? `resp_${parsed.id}` : state.responseId;
+          state.responseId = freshResponsesId();
           
           emit(controller, "response.created", {
             type: "response.created",

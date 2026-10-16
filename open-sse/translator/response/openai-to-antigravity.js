@@ -1,6 +1,7 @@
 import { register } from "../index.js";
 import { FORMATS } from "../formats.js";
 import { GEMINI_ROLE, OPENAI_FINISH, GEMINI_FINISH } from "../schema/index.js";
+import { freshResponsesId } from "../../utils/responseModelAlias.js";
 
 // Convert OpenAI SSE chunk to Antigravity SSE format
 // Real Antigravity format:
@@ -22,7 +23,7 @@ export function openaiToAntigravityResponse(chunk, state) {
 
   // Init state
   if (!state._toolCallAccum) state._toolCallAccum = {};
-  if (!state._responseId) state._responseId = chunk.id || `resp_${Date.now()}`;
+  if (!state._responseId) state._responseId = freshResponsesId();
   if (!state._modelVersion) state._modelVersion = chunk.model || "";
 
   const parts = [];

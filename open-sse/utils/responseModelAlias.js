@@ -11,8 +11,7 @@
  */
 
 /** Overwrite client-visible model identifiers in a response object in place. */
-export function applyDisplayModel(obj, displayModel) {
-  if (!obj || typeof obj !== "object" || typeof displayModel !== "string" || !displayModel) {
+export function applyDisplayModel(obj, displayModel) {  if (!obj || typeof obj !== "object" || typeof displayModel !== "string" || !displayModel) {
     return obj;
   }
   if (typeof obj.model === "string") obj.model = displayModel;
@@ -75,4 +74,25 @@ export function createModelAliasStream(displayModel) {
       buffer = "";
     },
   });
+}
+
+/**
+ * Fresh gateway-issued identifiers. Upstream response/message ids must never
+ * reach clients: their prefixes (`gen-`, `resp_`, …) fingerprint the backend.
+ * Timestamp + random suffix keeps ordering useful without leaking anything.
+ */
+function randSuffix() {
+  return Math.random().toString(36).slice(2, 8);
+}
+
+export function freshChatCompletionId() {
+  return `chatcmpl-${Date.now()}-${randSuffix()}`;
+}
+
+export function freshResponsesId() {
+  return `resp_${Date.now()}${randSuffix()}`;
+}
+
+export function freshClaudeMessageId() {
+  return `msg_${Date.now()}${randSuffix()}`;
 }

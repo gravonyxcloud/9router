@@ -3,25 +3,25 @@ import { ERROR_TYPES, DEFAULT_ERROR_MESSAGES } from "../config/errorConfig.js";
 /**
  * Build OpenAI-compatible error response body
  * @param {number} statusCode - HTTP status code
- * @param {string} message - Error message
+ * @param {string} message - Error message (server-logged by callers; never
+ *   echoed — client bodies carry only the generic per-status text below)
  * @returns {object} Error response object
  */
 function sanitizePublicError(message, statusCode) {
-  const raw = typeof message === "string" ? message : "";
-  // Never expose internal upstream/provider IDs or raw upstream payloads to API clients.
-  const safe = raw
-    .replace(/\b(?:opencode-zen|openrouter|anthropic|openai|claude-haiku-4-5)\/[a-z0-9._:-]+/gi, "the configured provider")
-    .replace(/Upstream request failed:\s*/gi, "The configured provider rejected the request: ")
-    .replace(/Insufficient account funds/gi, "The configured provider has insufficient credits")
-    .replace(/\s*\(cause:\s*[^)]*\)/gi, "")
-    .replace(/\b(?:provider|upstream)\s*[:=]\s*[^,;\s}]+/gi, "provider=[redacted]");
-  if (!safe || /\[object Object\]/i.test(safe)) {
-    if (statusCode === 402) return "The configured provider has insufficient credits or quota.";
-    if (statusCode === 401 || statusCode === 403) return "The configured provider rejected authorization.";
-    if (statusCode >= 500) return "The configured provider is temporarily unavailable.";
-    return "The request could not be completed.";
-  }
-  return safe.slice(0, 500);
+  // Anti-recon: upstream error wording (temperature dialects, quota
+  // phrasing, model names) fingerprints the backend. Clients get the HTTP
+  // status (needed for retries) plus a fixed message; raw detail stays in
+  // server logs. Keep in sync with DEFAULT_ERROR_MESSAGES in errorConfig.js.
+  if (statusCode === 400) return "Invalid request.";
+  if (statusCode === 401) return "Authentication failed.";
+  if (statusCode === 402) return "Payment required.";
+  if (statusCode === 403) return "Forbidden.";
+  if (statusCode === 404) return "Not found.";
+  if (statusCode === 406) return "Model not supported.";
+  if (statusCode === 408) return "Request timeout.";
+  if (statusCode === 429) return "Rate limited. Retry shortly.";
+  if (Number(statusCode) >= 500) return "Upstream unavailable.";
+  return "The request could not be completed.";
 }
 
 export function buildErrorBody(statusCode, message) {

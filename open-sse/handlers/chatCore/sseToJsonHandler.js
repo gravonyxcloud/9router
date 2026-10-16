@@ -1,6 +1,6 @@
 import { convertResponsesStreamToJson } from "../../transformer/streamToJsonConverter.js";
 import { restoreToolNames } from "../../utils/opencodeFingerprint.js";
-import { applyDisplayModel } from "../../utils/responseModelAlias.js";
+import { applyDisplayModel, freshChatCompletionId, freshResponsesId } from "../../utils/responseModelAlias.js";
 import { openAICompletionToClaudeMessage } from "./responseShapes.js";
 import { createErrorResult } from "../../utils/error.js";
 import { HTTP_STATUS, STREAM_STALL_TIMEOUT_MS } from "../../config/runtimeConfig.js";
@@ -93,7 +93,7 @@ function chatCompletionToResponses(responseBody, customToolNames = null) {
 
   const usage = responseBody.usage || {};
   return {
-    id: `resp_${responseBody.id || ""}`.replace(/^resp_chatcmpl-/, "resp_"),
+    id: freshResponsesId(),
     object: "response",
     created_at: responseBody.created || Math.floor(Date.now() / 1000),
     model: responseBody.model || "unknown",
@@ -169,7 +169,7 @@ export function parseSSEToOpenAIResponse(rawSSE, fallbackModel) {
   }
 
   const result = {
-    id: first.id || `chatcmpl-${Date.now()}`,
+    id: first.id && typeof first.id === "string" && first.id.startsWith("chatcmpl-") ? first.id : freshChatCompletionId(),
     object: "chat.completion",
     created: first.created || Math.floor(Date.now() / 1000),
     model: first.model || fallbackModel || "unknown",
@@ -267,7 +267,7 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
             candidates: [{ content: { role: "model", parts: [{ text: textContent || "" }] }, finishReason: "STOP", index: 0 }],
             usageMetadata: { promptTokenCount: inTokens, candidatesTokenCount: outTokens, totalTokenCount: inTokens + outTokens },
             modelVersion: model,
-            responseId: jsonResponse.id || `resp_${Date.now()}`
+            responseId: freshResponsesId()
           }
         };
       } else {
@@ -276,7 +276,7 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
         const responseDone = jsonResponse.status === "completed" || jsonResponse.status === "done";
         const finishReason = hasToolCalls ? "tool_calls" : (responseDone ? "stop" : (jsonResponse.status || "stop"));
         finalResp = {
-          id: jsonResponse.id || `chatcmpl-${Date.now()}`,
+          id: freshChatCompletionId(),
           object: "chat.completion",
           created: jsonResponse.created_at || Math.floor(Date.now() / 1000),
           model: jsonResponse.model || model,

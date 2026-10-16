@@ -23,10 +23,11 @@ import { toOpenAIUsage } from "../concerns/usage.js";
 import { reasoningDelta } from "../concerns/reasoning.js";
 import { fallbackToolCallId } from "../concerns/toolCall.js";
 import { toOpenAIFinish } from "../concerns/finishReason.js";
+import { freshChatCompletionId } from "../../utils/responseModelAlias.js";
 
 function ensureState(state, model) {
   if (!state.responseId) {
-    state.responseId = `chatcmpl-${Date.now()}`;
+    state.responseId = freshChatCompletionId();
     state.created = Math.floor(Date.now() / 1000);
     state.model = state.model || model || "commandcode";
     state.chunkIndex = 0;

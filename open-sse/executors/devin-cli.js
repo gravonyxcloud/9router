@@ -24,6 +24,7 @@ import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
 import { BaseExecutor } from "./base.js";
+import { freshChatCompletionId } from "../utils/responseModelAlias.js";
 
 // ─── Binary discovery ────────────────────────────────────────────────────────
 
@@ -456,7 +457,7 @@ export class DevinCliExecutor extends BaseExecutor {
         let initDone = false;
         let sessionCreated = false;
         let promptSent = false;
-        const responseId = `chatcmpl-devin-${Date.now()}`;
+        const responseId = freshChatCompletionId();
         const created = Math.floor(Date.now() / 1000);
         let roleEmitted = false;
         let totalText = "";

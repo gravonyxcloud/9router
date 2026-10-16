@@ -8,6 +8,7 @@ import { buildChunk } from "../concerns/chunk.js";
 import { buildUsage } from "../concerns/usage.js";
 import { fallbackToolCallId } from "../concerns/toolCall.js";
 import { reasoningDelta, extractReasoningText } from "../concerns/reasoning.js";
+import { freshResponsesId } from "../../utils/responseModelAlias.js";
 import { ROLE, OPENAI_BLOCK, RESPONSES_ITEM, OPENAI_FINISH, MODEL_FALLBACK } from "../schema/index.js";
 
 /**
@@ -76,7 +77,7 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
   // Emit initial events
   if (!state.started) {
     state.started = true;
-    state.responseId = chunk.id ? `resp_${chunk.id}` : state.responseId;
+    state.responseId = freshResponsesId();
     
     emit("response.created", {
       type: "response.created",

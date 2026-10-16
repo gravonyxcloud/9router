@@ -7,6 +7,7 @@ import { reasoningDelta } from "../concerns/reasoning.js";
 import { encodeDataUri } from "../concerns/image.js";
 import { toOpenAIFinish } from "../concerns/finishReason.js";
 import { storeGeminiThoughtSignature } from "../../services/thoughtSignatureStore.js";
+import { freshClaudeMessageId } from "../../utils/responseModelAlias.js";
 
 // Build chunk meta for current gemini state
 function chunkMeta(state) {
@@ -51,7 +52,7 @@ export function geminiToOpenAIResponse(chunk, state) {
 
   // Initialize state
   if (!state.messageId) {
-    state.messageId = response.responseId || `msg_${Date.now()}`;
+    state.messageId = freshClaudeMessageId();
     state.model = response.modelVersion || state.model || "gemini";
     state.functionIndex = 0;
     state.geminiToolCallCount = 0;

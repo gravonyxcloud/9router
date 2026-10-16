@@ -1,6 +1,7 @@
 import { FORMATS } from "../translator/formats.js";
 import { buildErrorBody } from "./error.js";
 import { SSE_DONE } from "./sseConstants.js";
+import { freshChatCompletionId } from "./responseModelAlias.js";
 
 const sharedEncoder = new TextEncoder();
 
@@ -65,13 +66,11 @@ export function hasValuableContent(chunk, format) {
   return true; // Other formats: keep all chunks
 }
 
-// Fix invalid id (generic or too short)
+// Fix invalid id (generic or too short). Always issues a fresh gateway id —
+// upstream request/trace ids must never reach clients (backend fingerprint).
 export function fixInvalidId(parsed) {
   if (parsed.id && (parsed.id === "chat" || parsed.id === "completion" || parsed.id.length < 8)) {
-    const fallbackId = parsed.extend_fields?.requestId || 
-                      parsed.extend_fields?.traceId || 
-                      Date.now().toString(36);
-    parsed.id = `chatcmpl-${fallbackId}`;
+    parsed.id = freshChatCompletionId();
     return true;
   }
   return false;

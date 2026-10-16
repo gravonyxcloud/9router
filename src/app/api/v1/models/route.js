@@ -169,6 +169,42 @@ const parseOpenAIStyleModels = (data) => {
 // and break recursive loops between 9router instances connected to each other.
 const INTERNAL_MODELS_FETCH_HEADER = "x-9r-internal-models-fetch";
 
+// In-memory fixed-window throttle for catalog scans (per API key, else IP).
+// Process-local: each instance enforces its own window (documented limitation
+// behind multi-instance deployments; the gateway key hourly limits still apply).
+const MODELS_THROTTLE_WINDOW_MS = 60 * 1000;
+const modelsThrottleBuckets = new Map();
+
+function modelsThrottleLimit() {
+  const raw = Number(process.env.MODELS_RATELIMIT_PER_MIN);
+  if (!Number.isFinite(raw) || raw <= 0) return 60;
+  return Math.min(1000, Math.floor(raw));
+}
+
+function checkModelsThrottle(request) {
+  const limit = modelsThrottleLimit();
+  const auth = request?.headers?.get("authorization") || request?.headers?.get("x-api-key") || "";
+  const ip = request?.headers?.get("x-9r-real-ip")
+    || (request?.headers?.get("x-forwarded-for") || "").split(",")[0].trim()
+    || "unknown";
+  const key = `${auth.slice(0, 32)}|${ip}`;
+  const now = Date.now();
+  let bucket = modelsThrottleBuckets.get(key);
+  if (!bucket || now >= bucket.resetAt) {
+    bucket = { count: 0, resetAt: now + MODELS_THROTTLE_WINDOW_MS };
+    modelsThrottleBuckets.set(key, bucket);
+    if (modelsThrottleBuckets.size > 5000) {
+      const oldest = [...modelsThrottleBuckets.entries()].sort((a, b) => a[1].resetAt - b[1].resetAt)[0];
+      if (oldest) modelsThrottleBuckets.delete(oldest[0]);
+    }
+  }
+  bucket.count += 1;
+  if (bucket.count > limit) {
+    return { limited: true, retryAfterSec: Math.max(1, Math.ceil((bucket.resetAt - now) / 1000)) };
+  }
+  return { limited: false, retryAfterSec: 0 };
+}
+
 // LLM kind sentinel — combos/models with no explicit kind default to LLM
 const LLM_KIND = "llm";
 
@@ -387,7 +423,14 @@ export async function buildModelsList(kindFilter, options = {}) {
       entry.kind = combo.kind;
     } else {
       const comboCaps = aggregateComboCapabilities(combo.models, comboByName, comboSeatCapabilities);
-      if (comboCaps) entry.capabilities = comboCaps;
+      // Anti-recon: thinkingFormat names the upstream wire dialect
+      // ("claude-adaptive", "qwen", "deepseek", …) and would unmask seats
+      // behind a neutral alias. Functional flags stay; the gateway reads
+      // wire formats from its own registry, never from this catalog.
+      if (comboCaps) {
+        const { thinkingFormat, ...publicCaps } = comboCaps;
+        if (Object.keys(publicCaps).length) entry.capabilities = publicCaps;
+      }
       // Any seat can serve the request, so the only window a combo can promise is
       // its smallest. Combo entries were the only models on this endpoint that
       // published no limits at all, which leaves a client to guess from the name —
@@ -658,6 +701,16 @@ export async function OPTIONS() {
  */
 export async function GET(request) {
   try {
+    // Anti-recon throttle: the catalog is enumerable, so unauthenticated
+    // scanners must not pull it at will. Generous fixed window per caller
+    // (API key when present, else IP). Env: MODELS_RATELIMIT_PER_MIN.
+    const throttle = checkModelsThrottle(request);
+    if (throttle.limited) {
+      return Response.json(
+        { error: { message: "Rate limited. Retry shortly.", type: "rate_limit_error", code: "rate_limit_exceeded" } },
+        { status: 429, headers: { "Access-Control-Allow-Origin": "*", "Retry-After": String(Math.min(30, throttle.retryAfterSec)) } },
+      );
+    }
     // Detect cross-instance recursive /models fetch (another 9router fetching our /models)
     const skipDynamicFetch = request?.headers?.get(INTERNAL_MODELS_FETCH_HEADER) === "1";
     const comboModels = (await buildModelsList([LLM_KIND], { skipDynamicFetch }))

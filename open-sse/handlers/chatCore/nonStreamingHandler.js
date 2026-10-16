@@ -12,7 +12,7 @@ import { buildRequestDetail, extractRequestConfig, extractUsageFromResponse, sav
 import { appendRequestLog, saveRequestDetail } from "@/lib/usageDb.js";
 import { decloakToolNames } from "../../utils/claudeCloaking.js";
 import { restoreToolNames } from "../../utils/opencodeFingerprint.js";
-import { applyDisplayModel } from "../../utils/responseModelAlias.js";
+import { applyDisplayModel, freshChatCompletionId, freshResponsesId } from "../../utils/responseModelAlias.js";
 import { ROLE, RESPONSES_ITEM } from "../../translator/schema/index.js";
 import { openAICompletionToClaudeMessage } from "./responseShapes.js";
 
@@ -77,7 +77,7 @@ function openAICompletionToResponses(responseBody, customToolNames = null) {
   const status = choice.finish_reason === "tool_calls" ? "completed" : (choice.finish_reason === "stop" ? "completed" : (choice.finish_reason || "completed"));
 
   return {
-    id: `resp_${responseBody.id || ""}`.replace(/^resp_chatcmpl-/, "resp_"),
+    id: freshResponsesId(),
     object: "response",
     created_at: responseBody.created || Math.floor(Date.now() / 1000),
     model: responseBody.model || "unknown",
@@ -149,7 +149,7 @@ export function translateNonStreamingResponse(responseBody, targetFormat, source
     if (finishReason === "stop" && toolCalls.length > 0) finishReason = "tool_calls";
 
     const result = {
-      id: `chatcmpl-${response.responseId || Date.now()}`,
+      id: freshChatCompletionId(),
       object: "chat.completion",
       created: Math.floor(new Date(response.createTime || Date.now()).getTime() / 1000),
       model: response.modelVersion || "gemini",
@@ -208,7 +208,7 @@ export function translateNonStreamingResponse(responseBody, targetFormat, source
     if (finishReason === "tool_use") finishReason = "tool_calls";
 
     const result = {
-      id: `chatcmpl-${responseBody.id || Date.now()}`,
+      id: freshChatCompletionId(),
       object: "chat.completion",
       created: Math.floor(Date.now() / 1000),
       model: responseBody.model || "claude",
