@@ -36,13 +36,13 @@ function directRaceEnabled() {
 // Cooldown bucket for the direct egress (shared across scopes — one IP).
 export const DIRECT_EGRESS_ID = "direct";
 
-// Parallel race size: how many proxies to try at once per wave.
-// Sequential failover (1) waits out every dead proxy; racing takes the
-// first working egress and aborts the losers. Env: PROXY_RACE_SIZE.
+// Parallel race size: how many egresses to try at once per wave (direct +
+// proxies). More parallelism finds the working egress faster; each extra
+// attempt is one more concurrent upstream call. Env: PROXY_RACE_SIZE.
 function proxyRaceSize() {
   const raw = Number(process.env.PROXY_RACE_SIZE);
-  if (!Number.isFinite(raw) || raw < 1) return 3;
-  return Math.min(8, Math.floor(raw));
+  if (!Number.isFinite(raw) || raw < 1) return 5;
+  return Math.min(10, Math.floor(raw));
 }
 
 // ─── TLS fingerprinting via got-scraping (browser-like JA3) ───────────────

@@ -13,7 +13,7 @@
  *   import from both src and open-sse.
  */
 
-export const PROXY_FAILOVER_MAX_ATTEMPTS = 4; // primary + 3 failovers per request
+export const PROXY_FAILOVER_MAX_ATTEMPTS = 6; // primary + 5 failovers per request
 export const PROXY_FAIL_COOLDOWN_MS = 5 * 60 * 1000;
 // Sticky pools slower than this lose priority and join the latency sort —
 // a working proxy stays pinned (stability first); only pathological
