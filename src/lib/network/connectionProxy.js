@@ -103,7 +103,8 @@ export async function resolveProxyFailoverOptions(credentials = {}, provider = "
       limit: PROXY_FAILOVER_MAX_ATTEMPTS,
     });
     if (ordered.length === 0) return null;
-    const [first, ...others] = ordered;
+    const raced = await preflightCandidates(ordered, scope);
+    const [first, ...others] = raced;
     return {
       connectionProxyUrl: normalizeString(first.proxyUrl),
       connectionNoProxy: normalizeString(first.noProxy),
@@ -121,6 +122,65 @@ export async function resolveProxyFailoverOptions(credentials = {}, provider = "
   } catch (error) {
     console.error("[resolveProxyFailoverOptions] Failed:", error);
     return null;
+  }
+}
+
+/**
+ * Pre-flight: verify the about-to-be-used candidates are alive RIGHT NOW
+ * before dispatching the request through them. Runs a cheap generic probe
+ * (not the full opencode check) over the top candidates in parallel.
+ *
+ * Bounded wait (PROXY_PREFLIGHT_WINDOW_MS, default 1500ms): verified pools
+ * jump to the front, confirmed failures drop to the back (and cool down),
+ * and anything still probing keeps its original slot — a dead candidate
+ * never stalls the request. Fail-open: any error (or nothing verified)
+ * returns the list untouched so the race still sorts it out.
+ *
+ * Env: PROXY_PREFLIGHT=0 disables, PROXY_PREFLIGHT_COUNT (default 4),
+ * PROXY_PREFLIGHT_TIMEOUT_MS (default 3000 per probe),
+ * PROXY_PREFLIGHT_WINDOW_MS (default 1500 total wait).
+ */
+async function preflightCandidates(ordered, scope) {
+  try {
+    if (!Array.isArray(ordered) || ordered.length <= 1) return ordered;
+    const flag = process.env.PROXY_PREFLIGHT;
+    if (flag != null && ["0", "false", "no", "off"].includes(String(flag).trim().toLowerCase())) {
+      return ordered;
+    }
+    const countRaw = Number(process.env.PROXY_PREFLIGHT_COUNT);
+    const count = Number.isFinite(countRaw) && countRaw > 0 ? Math.min(10, Math.floor(countRaw)) : 4;
+    const timeoutRaw = Number(process.env.PROXY_PREFLIGHT_TIMEOUT_MS);
+    const timeoutMs = Number.isFinite(timeoutRaw) && timeoutRaw > 0 ? Math.min(15000, Math.floor(timeoutRaw)) : 3000;
+    const windowRaw = Number(process.env.PROXY_PREFLIGHT_WINDOW_MS);
+    const windowMs = Number.isFinite(windowRaw) && windowRaw > 0 ? Math.min(10000, Math.max(250, Math.floor(windowRaw))) : 1500;
+    const { testProxyPool } = await import("./proxyTest.js");
+    const { noteProxyPoolResult } = await import("./proxyHealth.js");
+    const head = ordered.slice(0, count);
+    const settled = new Map();
+    const jobs = head.map((pool) => (async () => {
+      let ok = false;
+      try {
+        ok = !!(await testProxyPool(pool, { timeoutMs })).ok;
+      } catch {
+        ok = false;
+      }
+      settled.set(pool.id, ok);
+      if (!ok) {
+        try { noteProxyPoolResult(scope || null, pool.id, false); } catch { /* ignore */ }
+      }
+    })());
+    await Promise.race([
+      Promise.allSettled(jobs),
+      new Promise((resolve) => setTimeout(resolve, windowMs)),
+    ]);
+    const passed = head.filter((p) => settled.get(p.id) === true);
+    if (!passed.length) return ordered;
+    const failedIds = new Set([...settled.entries()].filter(([, ok]) => ok === false).map(([id]) => id));
+    const rest = ordered.filter((p) => !passed.some((q) => q.id === p.id) && !failedIds.has(p.id));
+    const failedPools = ordered.filter((p) => failedIds.has(p.id));
+    return [...passed, ...rest, ...failedPools];
+  } catch {
+    return ordered;
   }
 }
 
