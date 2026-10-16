@@ -7,6 +7,7 @@ import { HTTP_STATUS, STREAM_STALL_TIMEOUT_MS } from "../../config/runtimeConfig
 import { buildAbortedResponsesTerminalBytes } from "../../utils/responsesStreamHelpers.js";
 import { buildStreamErrorBytes } from "../../utils/streamHelpers.js";
 import { createModelAliasStream } from "../../utils/responseModelAlias.js";
+import { sniffStreamHead } from "../../utils/sniffStream.js";
 import { buildRequestDetail, extractRequestConfig, saveUsageStats, formatDoneLine } from "./requestDetail.js";
 import { saveRequestDetail } from "@/lib/usageDb.js";
 import { SSE_HEADERS_CORS as SSE_HEADERS } from "../../utils/sseConstants.js";
@@ -57,29 +58,38 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
 
   // When upstream returns HTML/text instead of SSE (e.g. Cloudflare 5xx error
   // page), piping it through the SSE transform stream causes Next.js
-  // "failed to pipe response" and crashes the chat router. Read the body,
-  // pull a short human-readable message from the <title>, sanitize it, and
-  // return a clean JSON error instead. The message is stripped of HTML tags
-  // and clamped so untrusted upstream text never reaches the client verbatim
-  // (the UI may render error.message as HTML).
+  // "failed to pipe response" and crashes the chat router. But some upstreams
+  // (or proxies) omit or mangle content-type on valid SSE — so sniff the
+  // first bytes before refusing: SSE/JSON-looking bodies proceed, anything
+  // else returns a clean JSON error with the real content-type attached.
   const upstreamContentType = (providerResponse.headers.get('content-type') || '').toLowerCase();
   if (upstreamContentType && !upstreamContentType.includes('text/event-stream') && !upstreamContentType.includes('application/json')) {
-    const bodyText = await providerResponse.text().catch(() => '');
-    const titleMatch = bodyText.match(/<title>([^<]+)<\/title>/i);
-    const sanitizedTitle = (titleMatch?.[1] || '').replace(/<[^>]*>/g, '').replace(/[\r\n]+/g, ' ').trim().slice(0, 160);
-    const shortMsg = sanitizedTitle
-      || (bodyText.length < 200 ? bodyText.replace(/<[^>]*>/g, '').trim().slice(0, 160) : `Upstream returned non-SSE response (${upstreamContentType})`);
-    const status = providerResponse.status || 502;
-    if (log?.errorLine) log.errorLine(reqTag, "✗", `BLOCKED ${status} · ${provider}/${model} · non-SSE (${upstreamContentType})\n    ${shortMsg}`);
-    else console.warn(`[STREAM] ${provider} | ${model} | blocked pipe: ${shortMsg} [${status}]`);
-    streamController?.handleError?.(new Error(`upstream non-SSE: ${status}`));
-    return {
-      success: false,
-      response: new Response(JSON.stringify({ error: { message: `[${status}]: ${shortMsg}` } }), {
-        status,
-        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
-      }),
-    };
+    const sniffed = await sniffStreamHead(providerResponse, 2048, 5000);
+    if (sniffed.kind === 'sse-json' && sniffed.body) {
+      providerResponse = new Response(sniffed.body, {
+        status: providerResponse.status,
+        statusText: providerResponse.statusText,
+        headers: providerResponse.headers,
+      });
+    } else {
+      const preview = (sniffed.preview || '').replace(/<[^>]*>/g, '').replace(/[\r\n]+/g, ' ').trim().slice(0, 160);
+      const titleMatch = (sniffed.preview || '').match(/<title>([^<]+)<\/title>/i);
+      const sanitizedTitle = (titleMatch?.[1] || '').replace(/<[^>]*>/g, '').replace(/[\r\n]+/g, ' ').trim().slice(0, 160);
+      const shortMsg = sanitizedTitle
+        || (preview || `Upstream returned non-SSE response (${upstreamContentType || 'no content-type'})`);
+      const status = providerResponse.status || 502;
+      const diag = `ct=${upstreamContentType || '-'} preview=${JSON.stringify(preview.slice(0, 80))}`;
+      if (log?.errorLine) log.errorLine(reqTag, "�o-", `BLOCKED ${status} · ${provider}/${model} · non-SSE (${diag})\n    ${shortMsg}`);
+      else console.warn(`[STREAM] ${provider} | ${model} | blocked pipe: ${shortMsg} [${status}] (${diag})`);
+      streamController?.handleError?.(new Error(`upstream non-SSE: ${status} (${diag})`));
+      return {
+        success: false,
+        response: new Response(JSON.stringify({ error: { message: `[${status}]: ${shortMsg}` } }), {
+          status,
+          headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+        }),
+      };
+    }
   }
 
   const transformStream = buildTransformStream({ provider, sourceFormat, targetFormat, userAgent, reqLogger, toolNameMap, customToolNames, model, connectionId, body, onStreamComplete, apiKey, credentials });
