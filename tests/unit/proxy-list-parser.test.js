@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   parseProxyLine,
   parseProxyList,
+  parseListBody,
   proxyIdentityKey,
   poolProxyIdentity,
   normalizeListProtocol,
@@ -137,8 +138,7 @@ describe("proxy identity", () => {
   });
 });
 
-describe("random proxy API payloads", () => {
-  const payload = {
+describe("random proxy API payloads", () => {  const payload = {
     proxy: "144.124.251.24:10274",
     http: "http://144.124.251.24:10274",
     latency: 1444,
@@ -177,5 +177,37 @@ describe("random proxy API payloads", () => {
     expect(randomApiEntry([])).toBeNull();
     expect(randomApiEntry({})).toBeNull();
     expect(randomApiEntry({ proxy: "not a proxy !!!" })).toBeNull();
+  });
+});
+
+describe("spys.me space-suffix lines", () => {
+  it("parses host:port with trailing metadata tokens", () => {
+    expect(parseProxyLine("134.209.79.30:3128 US-H -", "http")?.proxyUrl).toBe("http://134.209.79.30:3128");
+    expect(parseProxyLine("23.95.171.196:9050 US-H!", "socks5")?.proxyUrl).toBe("socks5://23.95.171.196:9050");
+  });
+
+  it("rejects non-proxy first tokens", () => {
+    expect(parseProxyLine("Proxy list (#400) updated", "http")).toBeNull();
+    expect(parseProxyLine("Support by donations:", "http")).toBeNull();
+  });
+});
+
+describe("HTML table lists", () => {
+  const html = `<table><thead><tr><th>IP Address</th><th>Port</th></tr></thead><tbody>
+    <tr><td>34.43.46.91</td><td>80</td><td>US</td></tr>
+    <tr><td>194.31.108.109</td><td>2080</td><td>IR</td></tr>
+    <tr><td>not-an-ip</td><td>xx</td><td>US</td></tr>
+  </tbody></table>`;
+
+  it("extracts IP/port rows and skips junk", () => {
+    const { entries } = parseListBody(html, "http");
+    expect(entries.map((e) => e.proxyUrl)).toEqual([
+      "http://34.43.46.91:80",
+      "http://194.31.108.109:2080",
+    ]);
+  });
+
+  it("throws on tables without usable rows", () => {
+    expect(() => parseListBody("<table><tr><td>nope</td></tr></table>", "http")).toThrow();
   });
 });

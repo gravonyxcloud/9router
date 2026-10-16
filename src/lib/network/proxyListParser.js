@@ -146,7 +146,19 @@ export function parseProxyLine(line, defaultProtocol = "http") {
   if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)) {
     return parseSchemeLine(trimmed, fallback);
   }
-  return parseBareLine(trimmed, fallback);
+  const direct = parseBareLine(trimmed, fallback);
+  if (direct) return direct;
+  // Trailing metadata suffix (spys.me shape: "1.2.3.4:8080 US-H -"): try the
+  // first token when the remainder looks like short metadata tokens.
+  const spaceIdx = trimmed.search(/\s/);
+  if (spaceIdx > 0) {
+    const head = trimmed.slice(0, spaceIdx);
+    const tail = trimmed.slice(spaceIdx + 1).trim();
+    if (head.includes(":") && /^[A-Za-z0-9+.!-]+( [A-Za-z0-9+.!-]+)*$/.test(tail)) {
+      return parseBareLine(head, fallback);
+    }
+  }
+  return null;
 }
 
 export function parseProxyList(text, defaultProtocol = "http") {
@@ -224,12 +236,59 @@ export function parseProxyListJson(text, defaultProtocol = "http") {
   return { entries, skipped };
 }
 
-/** Parse a fetched list body: JSON catalogs or plain text (auto-detected). */
+/** Parse a fetched list body: JSON catalogs, HTML tables, or plain text (auto-detected). */
 export function parseListBody(text, defaultProtocol = "http") {
-  if (/^\s*[{[]/.test(String(text || ""))) {
+  const raw = String(text || "");
+  if (/^\s*[{[]/.test(raw)) {
     return parseProxyListJson(text, defaultProtocol);
   }
+  if (/<\s*table[\s>]/i.test(raw)) {
+    return parseProxyListHtml(text, defaultProtocol);
+  }
   return parseProxyList(text, defaultProtocol);
+}
+
+/**
+ * Parse HTML proxy tables (sslproxies.org / free-proxy-list.net family):
+ * rows whose first two <td> cells are IP + port. Strict validation —
+ * anything else is skipped. Throws when no usable entries (like the rest).
+ */
+export function parseProxyListHtml(text, defaultProtocol = "http") {
+  const fallback = normalizeListProtocol(defaultProtocol) || "http";
+  const entries = [];
+  const seen = new Set();
+  let skipped = 0;
+  const rowRe = /<tr[^>]*>([\s\S]*?)<\/tr\s*>/gi;
+  const cellRe = /<td[^>]*>([\s\S]*?)<\/td\s*>/gi;
+  let rowMatch;
+  const stripTags = (s) => String(s || "").replace(/<[^>]*>/g, "").replace(/&nbsp;|&#160;/gi, " ").trim();
+  while ((rowMatch = rowRe.exec(String(text || ""))) !== null) {
+    const cells = [];
+    let cellMatch;
+    cellRe.lastIndex = 0;
+    while ((cellMatch = cellRe.exec(rowMatch[1])) !== null && cells.length < 3) {
+      cells.push(stripTags(cellMatch[1]));
+    }
+    if (cells.length < 2) continue;
+    const [ip, port] = cells;
+    if (!IPV4_RE.test(ip || "") || !validPort(port)) {
+      skipped += 1;
+      continue;
+    }
+    const entry = buildEntry(fallback, ip, port, "", "");
+    if (!entry) {
+      skipped += 1;
+      continue;
+    }
+    const key = proxyIdentityKey(entry);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    entries.push(entry);
+  }
+  if (entries.length === 0) {
+    throw new Error("URL did not return a recognizable proxy list (no table rows)");
+  }
+  return { entries, skipped };
 }
 
 /** Identity of an already-registered pool (parsed from its proxyUrl). */

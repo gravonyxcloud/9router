@@ -9,6 +9,7 @@ import { stringifyJson } from "./helpers/jsonCol.js";
 export const SEED_MARKER_KEY = "proxyListsSeededV1";
 export const SEED_MARKER_V2 = "proxyListsSeededV2";
 export const SEED_MARKER_V3 = "proxyListsSeededV3";
+export const SEED_MARKER_V4 = "proxyListsSeededV4";
 
 export const DEFAULT_PROXY_LIST_SOURCES = [
   { name: "ProxyScrape HTTP", url: "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all", protocol: "http" },
@@ -91,6 +92,22 @@ export const DEFAULT_PROXY_LIST_SOURCES = [
   { name: "OpenProxyList HTTPS", url: "https://api.openproxylist.xyz/https.txt", protocol: "http" },
   { name: "ProxySpace HTTP", url: "https://proxyspace.pro/http.txt", protocol: "http" },
   { name: "ProxySpace HTTPS", url: "https://proxyspace.pro/https.txt", protocol: "http" },
+  // V4 batch (2026-10-16, all fetch-validated live; needs the HTML-table and
+  // space-suffix parser support added alongside):
+  { name: "Spys HTTP", url: "https://spys.me/proxy.txt", protocol: "http" },
+  { name: "Spys SOCKS", url: "https://spys.me/socks.txt", protocol: "socks5" },
+  { name: "SSLProxies", url: "https://www.sslproxies.org/", protocol: "http" },
+  { name: "FreeProxyList", url: "https://free-proxy-list.net/", protocol: "http" },
+  { name: "USProxy", url: "https://www.us-proxy.org/", protocol: "http" },
+  { name: "UKProxy", url: "https://free-proxy-list.net/uk-proxy.html", protocol: "http" },
+  { name: "AnonymousProxy", url: "https://free-proxy-list.net/anonymous-proxy.html", protocol: "http" },
+  { name: "SSLProxyHtml", url: "https://free-proxy-list.net/ssl-proxy.html", protocol: "http" },
+  { name: "FreeProxyWorld HTTP", url: "https://www.freeproxy.world/?type=http&anonymity=&country=&speed=&port=&page=1", protocol: "http" },
+  { name: "FreeProxyWorld HTTPS", url: "https://www.freeproxy.world/?type=https&anonymity=&country=&speed=&port=&page=1", protocol: "http" },
+  { name: "GeoNode Page 6", url: "https://proxylist.geonode.com/api/proxy-list?limit=500&page=6&sort_by=lastChecked&sort_type=desc", protocol: "auto" },
+  { name: "GeoNode Page 7", url: "https://proxylist.geonode.com/api/proxy-list?limit=500&page=7&sort_by=lastChecked&sort_type=desc", protocol: "auto" },
+  { name: "GeoNode Page 8", url: "https://proxylist.geonode.com/api/proxy-list?limit=500&page=8&sort_by=lastChecked&sort_type=desc", protocol: "auto" },
+  { name: "hideip HTTPS", url: "https://raw.githubusercontent.com/zloi-user/hideip.me/main/https.txt", protocol: "http" },
 ];
 
 export function seedDefaultProxyListSources(adapter) {
@@ -100,6 +117,7 @@ export function seedDefaultProxyListSources(adapter) {
     // placing them after the V1 early-returns below would skip them forever.
     seedV2ProxyListSources(adapter);
     seedV3ProxyListSources(adapter);
+    seedV4ProxyListSources(adapter);
     if (getMetaSync(adapter, SEED_MARKER_KEY, null)) return { seeded: 0, skipped: "marked" };
     const existing = adapter.get(`SELECT COUNT(*) as c FROM proxyListSources`)?.c ?? 0;
     if (existing > 0) {
@@ -204,8 +222,15 @@ export function seedV2ProxyListSources(adapter) {
 }
 
 /**
- * V3 top-up (2026-10-15, +34 sources): same merge semantics as V2.
+ * V3 top-up (2026-10-15, +33 sources): same merge semantics as V2.
  */
 export function seedV3ProxyListSources(adapter) {
   return seedMissingFactorySources(adapter, SEED_MARKER_V3, "V3");
+}
+
+/**
+ * V4 top-up (2026-10-16, +14 sources): same merge semantics as V2.
+ */
+export function seedV4ProxyListSources(adapter) {
+  return seedMissingFactorySources(adapter, SEED_MARKER_V4, "V4");
 }
