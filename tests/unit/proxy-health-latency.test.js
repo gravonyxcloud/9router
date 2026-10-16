@@ -79,4 +79,13 @@ describe("proxyHealth host diversity", () => {
     const ordered = orderProxyCandidates(pools, { limit: 3 }).map((p) => p.id);
     expect(ordered).toEqual(["s1", "f", "s2"]);
   });
+
+  it("prefers opencode-verified pools over faster unverified ones", () => {
+    const pools = [
+      { id: "unv", proxyUrl: "http://9.9.9.9:1", latencyMs: 100 },
+      { id: "ver", proxyUrl: "http://8.8.8.8:1", latencyMs: 2000, opencodeOk: true },
+    ];
+    const ordered = orderProxyCandidates(pools, { limit: 2 }).map((p) => p.id);
+    expect(ordered).toEqual(["ver", "unv"]);
+  });
 });

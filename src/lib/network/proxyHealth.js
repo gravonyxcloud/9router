@@ -182,15 +182,16 @@ export function spreadHostsFirst(list) {
 
 /**
  * Order pool candidates for failover attempts (pure, unit-testable).
- * [fast-sticky-if-valid, primary-if-present, rest by latency, cooling last],
- * capped at `limit` entries. Pools must be pre-filtered (active, non-relay,
- * with URL); identity is by pool.id.
+ * [fast-sticky-if-valid, primary-if-present, opencode-ok by latency,
+ *  rest by latency, cooling last], capped at `limit` entries. Pools must be
+ * pre-filtered (active, non-relay, with URL); identity is by pool.id.
  *
  * Latency rule: a sticky pool slower than STICKY_SLOW_MS loses its priority
  * and joins the latency sort — a slow-but-working proxy must not stall every
- * request. Within the fresh set, known latencies sort ascending and
- * never-measured pools go last (they are still covered by the background
- * rotation, which tests oldest-first).
+ * request. Within the fresh set, opencodeOk-verified pools come first (they
+ * proved themselves against the real target, not just a generic probe),
+ * then the rest by latency; never-measured pools sort last. Cooling pools
+ * stay last regardless.
  */
 export function orderProxyCandidates(pools, { primaryId = null, stickyId = null, limit = 4 } = {}) {
   const list = Array.isArray(pools) ? pools : [];
@@ -210,14 +211,16 @@ export function orderProxyCandidates(pools, { primaryId = null, stickyId = null,
   }
   if (primaryId) push(byId.get(primaryId));
   const rest = list.filter((p) => p && p.id && !seen.has(p.id));
-  const fresh = rest
-    .filter((p) => failedMsAgo(p.id, now) === Infinity)
-    .sort((a, b) => poolLatencyMs(a, now) - poolLatencyMs(b, now));
+  // Fresh pools in strict tiers: opencode-verified first (proved against the
+  // real target), then the rest — each tier latency-ordered with same-host
+  // pools spread apart. Cooling pools keep recency order regardless.
+  const byLatency = (a, b) => poolLatencyMs(a, now) - poolLatencyMs(b, now);
+  const fresh = rest.filter((p) => failedMsAgo(p.id, now) === Infinity);
+  const verified = spreadHostsFirst(fresh.filter((p) => p.opencodeOk === true).sort(byLatency));
+  const restFresh = spreadHostsFirst(fresh.filter((p) => p.opencodeOk !== true).sort(byLatency));
   const cooling = rest
     .filter((p) => failedMsAgo(p.id, now) !== Infinity)
     .sort((a, b) => failedMsAgo(b.id, now) - failedMsAgo(a.id, now));
-  // Fresh pools come latency-ordered; spread same-host pools apart so
-  // consecutive attempts hit different egress IPs (cooling keeps recency).
-  for (const p of [...spreadHostsFirst(fresh), ...cooling]) push(p);
+  for (const p of [...verified, ...restFresh, ...cooling]) push(p);
   return ordered.slice(0, Math.max(1, limit));
 }
