@@ -464,7 +464,7 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       ]);
       if (raced.tag === "hedge") {
         hedgesUsed += 1;
-        log.info("COMBO", `Hedging slow seat with model ${nextIdx + 1}/${rotatedModels.length}: ${rotatedModels[nextIdx]}`);
+        log.info("COMBO", `Hedging slow seat (no output for ${Math.round(COMBO_HEDGE_DELAY_MS / 1000)}s) with model ${nextIdx + 1}/${rotatedModels.length}: ${rotatedModels[nextIdx]}`);
         launchSeat(nextIdx++);
         continue;
       }

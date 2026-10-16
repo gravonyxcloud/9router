@@ -2,7 +2,7 @@ import { Readable } from "stream";
 import { MEMORY_CONFIG } from "../config/runtimeConfig.js";
 import { dbg } from "./debugLog.js";
 import { isSocksProxyUrl, isStrictTls } from "../../src/lib/network/socksFetch.js";
-import { PROXY_FAILOVER_MAX_ATTEMPTS, noteProxyPoolResult } from "../../src/lib/network/proxyHealth.js";
+import { PROXY_FAILOVER_MAX_ATTEMPTS, noteProxyPoolResult, isCoolingDown } from "../../src/lib/network/proxyHealth.js";
 
 /**
  * Snapshot a 429 body for later surfacing: read the (small) error text now
@@ -22,6 +22,19 @@ async function snapshot429(response) {
 
 const originalFetch = globalThis.fetch;
 const proxyDispatchers = new Map();
+
+// Direct egress also races (not only as last resort): the direct IP is
+// often the fastest path, and when it is burned its cooldown skips it.
+// Env PROXY_DIRECT_RACE=0 disables. Strict mode never races direct.
+function directRaceEnabled() {
+  const raw = process.env.PROXY_DIRECT_RACE;
+  if (raw == null || raw === "") return true;
+  const v = String(raw).trim().toLowerCase();
+  return !(v === "0" || v === "false" || v === "no" || v === "off");
+}
+
+// Cooldown bucket for the direct egress (shared across scopes — one IP).
+export const DIRECT_EGRESS_ID = "direct";
 
 // Parallel race size: how many proxies to try at once per wave.
 // Sequential failover (1) waits out every dead proxy; racing takes the
@@ -441,6 +454,18 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
     let strictAny = false;
     let lastError = null;
     let first429 = null;
+    let directTried = false;
+    // Direct egress races in the first wave (usually the fastest path when
+    // clean). Skipped for strict (never leave via direct), while cooling
+    // down from a recent 429/failure, or in legacy sequential mode.
+    if (
+      raceSize > 1 &&
+      directRaceEnabled() &&
+      proxyOptions?.strictProxy !== true &&
+      !isCoolingDown(DIRECT_EGRESS_ID)
+    ) {
+      attempts.unshift({ proxyPoolId: null, url: null, strict: false, direct: true });
+    }
     for (let waveStart = 0; waveStart < attempts.length; waveStart += raceSize) {
       if (options.signal?.aborted) {
         throw options.signal.reason || new Error("aborted");
@@ -478,13 +503,16 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
           const attempt = wave[settled.k];
           if (settled.response) {
             const response = settled.response;
+            const egressId = attempt.proxyPoolId || (attempt.direct ? DIRECT_EGRESS_ID : null);
+            const egressLabel = attempt.direct ? "direct" : `pool ${attempt.proxyPoolId || "unknown"}`;
+            if (attempt.direct) directTried = true;
             // 429 = this egress IP is burned (rate limited), not a transport
             // failure: cool it down and keep waiting for the rest of the wave
             // instead of pinning it sticky and surfacing the 429.
             if (response.status === 429) {
               strictAny = strictAny || attempt.strict;
-              lastError = new Error(`HTTP 429 rate limited via pool ${attempt.proxyPoolId || "unknown"}`);
-              noteProxyPoolResult(scope, attempt.proxyPoolId, false);
+              lastError = new Error(`HTTP 429 rate limited via ${egressLabel}`);
+              noteProxyPoolResult(scope, egressId, false);
               if (!first429) first429 = await snapshot429(response);
               else {
                 try {
@@ -492,7 +520,7 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
                   else await response.text();
                 } catch { /* drain best-effort so sockets don't pile up */ }
               }
-              dbg("PROXY", `proxy rate-limited (429) via pool ${attempt.proxyPoolId || "unknown"}, waiting wave`);
+              dbg("PROXY", `egress rate-limited (429) via ${egressLabel}, waiting wave`);
               continue;
             }
             winner = { response, attempt, elapsedMs: settled.elapsedMs };
@@ -500,7 +528,13 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
           }
           strictAny = strictAny || attempt.strict;
           lastError = settled.error;
-          noteProxyPoolResult(scope, attempt.proxyPoolId, false);
+          if (attempt.direct) {
+            directTried = true;
+            noteProxyPoolResult(scope, DIRECT_EGRESS_ID, false);
+            dbg("PROXY", `direct egress failed, waiting wave: ${settled.error?.message || settled.error}`);
+          } else {
+            noteProxyPoolResult(scope, attempt.proxyPoolId, false);
+          }
         }
       } finally {
         try { parentSignal?.removeEventListener?.("abort", onParentAbort); } catch { /* ignore */ }
@@ -510,7 +544,12 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
           if (wave[k] === winner.attempt) continue;
           try { controllers[k].abort(); } catch { /* ignore */ }
         }
-        noteProxyPoolResult(scope, winner.attempt.proxyPoolId, true, winner.elapsedMs);
+        if (winner.attempt.direct) {
+          noteProxyPoolResult(scope, DIRECT_EGRESS_ID, true, winner.elapsedMs);
+          dbg("PROXY", `race won by direct egress in ${winner.elapsedMs}ms`);
+        } else {
+          noteProxyPoolResult(scope, winner.attempt.proxyPoolId, true, winner.elapsedMs);
+        }
         if (waveStart > 0 || wave.indexOf(winner.attempt) > 0) {
           dbg("PROXY", `race won by pool ${winner.attempt.proxyPoolId || "unknown"} in ${winner.elapsedMs}ms`);
         }
@@ -530,6 +569,11 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
     // If strictProxy is enabled, fail hard instead of falling back to direct
     if (strictAny || proxyOptions?.strictProxy === true) {
       throw new Error(`[ProxyFetch] Proxy required but failed (strictProxy=true): ${finalMessage}`);
+    }
+    // Direct already raced (and lost/failed) — retrying it verbatim adds
+    // nothing; surface the failure so account/combo fallback can proceed.
+    if (directTried) {
+      throw new Error(`[ProxyFetch] All egresses failed (direct + proxies): ${finalMessage}`);
     }
     if (attempts.length === 1) {
       console.warn(`[ProxyFetch] Proxy failed, falling back to direct: ${finalMessage}`);
