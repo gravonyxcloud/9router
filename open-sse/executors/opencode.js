@@ -179,8 +179,7 @@ function normalizeRequestId(value) {
   if (typeof value !== "string") return null;
   const normalized = value.trim();
   if (!normalized || normalized.length > MAX_SESSION_LENGTH) return null;
-  return OPENCODE_REQUEST_RE.test(normalized) ? normalized : null;
-}
+  return OPENCODE_REQUEST_RE.test(normalized) ? normalized : null;}
 
 // Strip the thinking suffix "model(level)" so registry lookups hit the base id.
 function baseModelId(model) {
@@ -400,6 +399,8 @@ export class OpenCodeExecutor extends BaseExecutor {
     return super.execute({ ...args, credentials: this.prepareRequestCredentials(args) });
   }
 
+  // Free tier moved from /zen/v1 to /inference/v1 (OpenCode v2); /zen/v1 now
+  // answers every free request with 403 FreeTierError.
   buildUrl(model) {
     const base = this.config.baseUrl;
     if (isResponsesModel(model)) return `${base}/inference/v1/responses`;
@@ -419,6 +420,10 @@ export class OpenCodeExecutor extends BaseExecutor {
     const downstreamReq = normalizeRequestId(lower["x-opencode-request"]);
     const requestId = credentials?.[REQ_FIELD] || downstreamReq || generateRequestId();
 
+    // Mirrors the v2 CLI. Upstream needs x-opencode-session-id next to
+    // x-opencode-session. x-opencode-request (stable per-turn id) plus the
+    // v2 affinity pair are all accepted (verified live); the affinity pair
+    // future-proofs against gate tightening.
     const headers = {
       "Content-Type": "application/json",
       "Authorization": "Bearer public",
@@ -427,6 +432,8 @@ export class OpenCodeExecutor extends BaseExecutor {
       "x-opencode-session": session,
       "x-opencode-session-id": session,
       "x-opencode-request": requestId,
+      "x-session-affinity": session,
+      "x-session-id": session,
       "x-opencode-project": lower["x-opencode-project"] || "global",
       "Accept": stream ? "text/event-stream" : "*/*",
     };

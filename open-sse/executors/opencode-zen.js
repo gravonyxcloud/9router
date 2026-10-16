@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { DefaultExecutor } from "./default.js";
 import { normalizeFreeTierReasoningEffort } from "./opencode.js";
-import { isMuseSparkModel } from "../providers/models/helpers.js";
+import { isMuseSparkModel, isOpencodeFreeTierModel } from "../providers/models/helpers.js";
 import {
   mintOpencodeSessionId,
   stableOpencodeSession,
@@ -275,17 +275,22 @@ export class OpenCodeZenExecutor extends DefaultExecutor {
     const downstreamUa = lower["user-agent"] || "";
     // Free-tier gate: spoof the official client UA.
     headers["User-Agent"] = hasValidOpencodeVersion(downstreamUa) ? downstreamUa : OPENCODE_UA;
-    headers["x-opencode-client"] = lower["x-opencode-client"] || "cli";
+    headers["x-opencode-client"] = lower["x-opencode-client"] || "desktop";
+    headers["x-opencode-project"] = lower["x-opencode-project"] || "global";
     const prepared = credentials?.[SESSION_FIELD];
-    if (prepared) {
-      headers[SESSION_HEADER] = prepared;
-      headers["x-opencode-session-id"] = prepared;
-      return headers;
+    const session = prepared || this.prepareRequestCredentials({ credentials })[SESSION_FIELD];
+    headers[SESSION_HEADER] = session;
+    headers["x-opencode-session-id"] = session;
+    headers["x-session-affinity"] = session;
+    headers["x-session-id"] = session;
+    if (isOpencodeFreeTierModel(model)) {
+      // Free-tier models are gated behind the attested free-tier identity even
+      // on the keyed lane: a real oc_sk_* key answers 403 FreeTierError, while
+      // `Bearer public` + session/request ids succeed. Paid models keep the
+      // connection key untouched.
+      headers["Authorization"] = "Bearer public";
+      headers["x-opencode-request"] = generateRequestId();
     }
-
-    const fallback = this.prepareRequestCredentials({ credentials });
-    headers[SESSION_HEADER] = fallback[SESSION_FIELD];
-    headers["x-opencode-session-id"] = fallback[SESSION_FIELD];
     return headers;
   }
 
