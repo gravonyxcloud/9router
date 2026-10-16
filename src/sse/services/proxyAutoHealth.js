@@ -12,6 +12,7 @@
  */
 import { getProxyPools, updateProxyPool } from "@/lib/db/index.js";
 import { isRelayPoolType, testProxyPool, testProxyOpencodeTarget } from "@/lib/network/proxyTest.js";
+import { getStickyPoolIds } from "@/lib/network/proxyHealth.js";
 
 const DEFAULT_INTERVAL_MS = 60 * 1000;
 const INITIAL_DELAY_MS = 45 * 1000;
@@ -67,6 +68,43 @@ function isNonServerRuntime() {
   return false;
 }
 
+// Hot standby: re-test the pools traffic actually depends on FIRST every
+// tick (current stickies + fastest opencode-verified), so failover data is
+// never stale and a replacement is instantly ready when one drops. The rest
+// of the batch keeps rotating oldest-first over the fleet.
+const HOT_STANDBY_SIZE = 20;
+
+function pickHotStandby(testable) {
+  if (!testable.length) return [];
+  const hotIds = new Set();
+  try {
+    for (const id of getStickyPoolIds()) hotIds.add(id);
+  } catch { /* health module unavailable — skip */ }
+  const byId = new Map(testable.map((p) => [p.id, p]));
+  const hot = [];
+  for (const id of hotIds) {
+    const pool = byId.get(id);
+    if (pool && hot.length < HOT_STANDBY_SIZE) hot.push(pool);
+  }
+  if (hot.length < HOT_STANDBY_SIZE) {
+    const lat = (p) => {
+      for (const key of ["opencodeLatencyMs", "latencyMs"]) {
+        const ms = Number(p?.[key]);
+        if (Number.isFinite(ms) && ms >= 0) return ms;
+      }
+      return Infinity;
+    };
+    const rest = testable
+      .filter((p) => p?.opencodeOk === true && !hot.some((h) => h.id === p.id))
+      .sort((a, b) => lat(a) - lat(b));
+    for (const p of rest) {
+      if (hot.length >= HOT_STANDBY_SIZE) break;
+      hot.push(p);
+    }
+  }
+  return hot;
+}
+
 function oldestFirst(pools) {
   return [...pools].sort((a, b) => {
     const ta = a.lastTestedAt ? new Date(a.lastTestedAt).getTime() : 0;
@@ -116,7 +154,12 @@ export async function runProxyAutoHealthTick() {
       lastRun.error = null;
       return { ok: true, tested: 0 };
     }
-    const batch = oldestFirst(testable).slice(0, BATCH_SIZE);
+    const hot = pickHotStandby(testable);
+    const hotIds = new Set(hot.map((p) => p.id));
+    const batch = [
+      ...hot,
+      ...oldestFirst(testable.filter((p) => !hotIds.has(p.id))).slice(0, Math.max(0, BATCH_SIZE - hot.length)),
+    ].slice(0, BATCH_SIZE);
     const results = await mapWithConcurrency(batch, TEST_CONCURRENCY, async (pool) => {
       // Stage 1: cheap generic probe. Stage 2 (only on pass, non-relay):
       // can this egress IP actually reach OpenCode, or is it burned

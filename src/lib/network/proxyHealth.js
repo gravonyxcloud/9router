@@ -16,8 +16,9 @@
 export const PROXY_FAILOVER_MAX_ATTEMPTS = 4; // primary + 3 failovers per request
 export const PROXY_FAIL_COOLDOWN_MS = 5 * 60 * 1000;
 // Sticky pools slower than this lose priority and join the latency sort —
-// otherwise one slow-but-working proxy gets pinned and every request stalls.
-export const STICKY_SLOW_MS = 4000;
+// a working proxy stays pinned (stability first); only pathological
+// stickies rotate away. The 20s seat hedge still guards true stalls.
+export const STICKY_SLOW_MS = 15000;
 // Live latency observations older than this are ignored (stale).
 export const LIVE_LATENCY_TTL_MS = 5 * 60 * 1000;
 const MAX_TRACKED_POOLS = 5000;
@@ -65,6 +66,11 @@ export function noteProxyPoolResult(scope, poolId, ok, elapsedMs = null) {
 export function getStickyProxyPoolId(scope) {
   if (!scope) return null;
   return stickyByScope.get(scope) || null;
+}
+
+/** All currently pinned pool ids (deduplicated) — for hot-standby refresh. */
+export function getStickyPoolIds() {
+  return [...new Set(stickyByScope.values())].filter(Boolean);
 }
 
 /** ms since the pool last failed (Infinity when never/expired). */
