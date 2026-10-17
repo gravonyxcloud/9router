@@ -20,6 +20,32 @@ async function snapshot429(response) {
   return { status: response.status || 429, retryAfter, text };
 }
 
+/**
+ * A 403 whose body is the free-tier gate ("FreeTierError" — e.g. OpenCode
+ * bans the egress IP) or a proxy's own HTML "Forbidden" page says the EGRESS
+ * is unusable, not the request. Such a response must not win an egress race.
+ * Returns { status, text, contentType } for later surfacing, else null.
+ */
+async function snapshotEgressReject(response) {
+  let text = "";
+  try {
+    text = await response.clone().text();
+  } catch {
+    return null;
+  }
+  const trimmed = text.trim();
+  const isFreeTierGate = /FreeTierError|free tier can only be used/i.test(text);
+  const isProxyPage = trimmed.length > 0 && !/^[[{]/.test(trimmed);
+  if (!isFreeTierGate && !isProxyPage) return null;
+  let contentType = "";
+  try { contentType = response.headers?.get?.("content-type") || ""; } catch { /* ignore */ }
+  try {
+    if (response.body && typeof response.body.cancel === "function") await response.body.cancel();
+    else await response.text();
+  } catch { /* ignore */ }
+  return { status: response.status || 403, text, contentType };
+}
+
 const originalFetch = globalThis.fetch;
 const proxyDispatchers = new Map();
 
@@ -454,6 +480,7 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
     let strictAny = false;
     let lastError = null;
     let first429 = null;
+    let firstReject = null;
     let directTried = false;
     // Direct egress races in the first wave (usually the fastest path when
     // clean). Skipped for strict (never leave via direct), while cooling
@@ -523,6 +550,22 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
               dbg("PROXY", `egress rate-limited (429) via ${egressLabel}, waiting wave`);
               continue;
             }
+            // 403 gate/proxy-page = this egress can't serve the request (egress
+            // IP banned by the free-tier gate, or the proxy's own Forbidden
+            // page): like a 429 it never wins — cool it down and keep waiting
+            // for a viable egress (direct included). Surfaced after the waves
+            // only when nothing else worked.
+            if (response.status === 403) {
+              const rejection = await snapshotEgressReject(response);
+              if (rejection) {
+                strictAny = strictAny || attempt.strict;
+                lastError = new Error(`HTTP 403 egress rejected via ${egressLabel}`);
+                noteProxyPoolResult(scope, egressId, false);
+                if (!firstReject) firstReject = rejection;
+                dbg("PROXY", `egress rejected (403) via ${egressLabel}, waiting wave`);
+                continue;
+              }
+            }
             winner = { response, attempt, elapsedMs: settled.elapsedMs };
             break;
           }
@@ -564,6 +607,14 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
       const headers = { "Content-Type": "application/json" };
       if (first429.retryAfter) headers["retry-after"] = first429.retryAfter;
       return new Response(first429.text, { status: 429, headers });
+    }
+    // Every egress got a 403 gate/page (or failed): surface the first one so
+    // downstream fallback sees the same status it saw before the race learned
+    // to skip rejected egresses.
+    if (firstReject) {
+      const headers = {};
+      if (firstReject.contentType) headers["Content-Type"] = firstReject.contentType;
+      return new Response(firstReject.text, { status: firstReject.status, headers });
     }
     const finalMessage = lastError?.message || String(lastError || "all proxies failed");
     // If strictProxy is enabled, fail hard instead of falling back to direct

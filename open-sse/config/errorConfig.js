@@ -47,6 +47,43 @@ const COOLDOWN = {
   short: 5 * 1000,
 };
 
+// Dead/retired models: the model id itself is gone upstream (410 Gone,
+// "has been deprecated", "model not found"). Retrying the same id cannot
+// succeed, so a combo must skip the seat instead of returning the error.
+export const MODEL_GONE_STATUSES = [410];
+export const MODEL_GONE_TEXT = [
+  "has been deprecated",
+  "model not found",
+  "model_not_found",
+  "model was not found",
+  "no such model",
+  "model does not exist",
+  "model doesn't exist",
+  "unknown model",
+  "model is no longer available",
+];
+// How long a combo skips a model after it answers with a gone-model error.
+export const MODEL_GONE_TTL_MS = 10 * 60 * 1000;
+
+// "model <id> was not found" / "... does not exist" / "... no longer
+// available" style messages — the phrase may sit up to ~120 chars after the
+// word "model" because the id is in between.
+const MODEL_GONE_PATTERN =
+  /model[^.!?\n]{0,120}?(?:not found|does not exist|doesn't exist|no longer available|has been deprecated)/i;
+
+/**
+ * True when the error says the MODEL does not exist anymore (as opposed to a
+ * request/account problem). Callers use it to drop the seat fast.
+ */
+export function isModelGoneError(status, errorText) {
+  if (MODEL_GONE_STATUSES.includes(status)) return true;
+  const lower = errorText
+    ? (typeof errorText === "string" ? errorText : JSON.stringify(errorText)).toLowerCase()
+    : "";
+  if (!lower) return false;
+  return MODEL_GONE_TEXT.some((text) => lower.includes(text)) || MODEL_GONE_PATTERN.test(lower);
+}
+
 /**
  * Unified error classification rules.
  * Checked top-to-bottom: text rules first (by order), then status rules.
@@ -68,7 +105,12 @@ export const ERROR_RULES = [
   { text: "capacity",                 backoff: true },
   { text: "overloaded",               backoff: true },
 
+  // Dead/retired model ids: fall through to the next combo seat (see
+  // isModelGoneError); keeping one source of truth for statuses + text.
+  ...MODEL_GONE_TEXT.map((text) => ({ text, cooldownMs: COOLDOWN.long })),
+
   // --- Status-based rules (fallback when text doesn't match) ---
+  ...MODEL_GONE_STATUSES.map((status) => ({ status, cooldownMs: COOLDOWN.long })),
   { status: 401, cooldownMs: COOLDOWN.long },
   { status: 402, cooldownMs: COOLDOWN.long },
   { status: 403, cooldownMs: COOLDOWN.long },

@@ -3,6 +3,7 @@
  */
 
 import { checkFallbackError, formatRetryAfter } from "./accountFallback.js";
+import { isModelGoneError, MODEL_GONE_TTL_MS } from "../config/errorConfig.js";
 import { unavailableResponse } from "../utils/error.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { extractTextContent } from "../translator/formats/gemini.js";
@@ -27,6 +28,23 @@ export const COMBO_HEDGE_MAX_EXTRA = (() => {
   const n = parseInt(process.env.COMBO_HEDGE_MAX_EXTRA || "", 10);
   return Number.isFinite(n) && n >= 0 ? Math.min(3, n) : 1;
 })();
+
+// Seats that answered with a gone-model error (410/deprecated/not found) are
+// skipped instantly for MODEL_GONE_TTL_MS instead of paying another upstream
+// round-trip per request. Process-local, keyed by exact seat id.
+const goneSeats = new Map();
+function markSeatGone(seat) {
+  goneSeats.set(seat, Date.now() + MODEL_GONE_TTL_MS);
+}
+function isSeatMarkedGone(seat) {
+  const until = goneSeats.get(seat);
+  if (!until) return false;
+  if (until <= Date.now()) {
+    goneSeats.delete(seat);
+    return false;
+  }
+  return true;
+}
 
 /**
  * Scrub real upstream seat ids from client-facing error text. When every
@@ -401,6 +419,12 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
   // Never rejects — unexpected exceptions become fallback continuations.
   const runSeat = async (idx) => {
     const modelStr = rotatedModels[idx];
+    if (isSeatMarkedGone(modelStr)) {
+      log.warn("COMBO", `Skipping model ${modelStr} (gone upstream, cached)`);
+      lastError = lastError || `Model ${modelStr} is gone`;
+      if (!lastStatus) lastStatus = 410;
+      return { done: false };
+    }
     log.info("COMBO", `Trying model ${idx + 1}/${rotatedModels.length}: ${modelStr}`);
 
     try {
@@ -456,10 +480,20 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
         try { errorText = JSON.stringify(errorText); } catch { errorText = String(errorText); }
       }
 
+      // Gone-model errors (410 Gone, "has been deprecated", "model not found")
+      // mean the seat id is dead upstream: cache it so later requests skip it
+      // outright. The combo always moves on — even when the errorText did not
+      // match a fallback rule by itself.
+      const modelGone = isModelGoneError(result.status, errorText);
+      if (modelGone) {
+        markSeatGone(modelStr);
+        log.warn("COMBO", `Model ${modelStr} is gone upstream (${result.status}); skipping for ${Math.round(MODEL_GONE_TTL_MS / 60000)}min`);
+      }
+
       // Check if should fallback to next model
       const { shouldFallback, cooldownMs } = checkFallbackError(result.status, errorText);
 
-      if (!shouldFallback) {
+      if (!shouldFallback && !modelGone) {
         log.warn("COMBO", `Model ${modelStr} failed (no fallback)`, { status: result.status });
         return { done: true, response: await sanitizePassthroughResponse(result, rotatedModels, comboName) };
       }
