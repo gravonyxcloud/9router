@@ -94,8 +94,8 @@ RUN apk add --no-cache su-exec && \
 
 EXPOSE 20128
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||'20128')+'/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+HEALTHCHECK --interval=30s --timeout=20s --start-period=120s --retries=3 \
+  CMD wget -q -T 15 -O /dev/null "http://127.0.0.1:${PORT:-20128}/api/health" || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["node", "custom-server.js"]
